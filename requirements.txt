@@ -1,0 +1,20 @@
+# --- Core & Data ---
+python-dotenv>=1.0.0       # For managing .env secrets
+duckdb>=0.9.0              # The 72M trade database engine
+pandas>=2.0.0              # Data manipulation for the "Bouncer"
+numpy>=1.24.0              # Math operations for calculating edge
+# nflreadpy>=0.1.5           # The official NFL stats library (replaces nfl_data_py)
+nba_api>=1.4.0            # The official NBA stats library
+
+# --- Connectivity & Streaming ---
+websockets>=12.0           # Async WebSocket client for Kalshi
+requests>=2.31.0           # HTTP requests for ESPN API
+cryptography>=41.0.0       # RSA-PSS signing for Kalshi Authentication
+
+# --- AI Agents ---
+anthropic>=0.7.0           # For Claude 3.5 Sonnet (Lead Analyst)
+openai>=1.0.0              # Optional: If you use GPT-4 as the Critic
+
+# --- Testing & Dev ---
+pytest>=7.4.0              # Unit testing framework
+pytest-asyncio>=0.23.0     # For testing async WebSocket functions

@@ -1,0 +1,4 @@
+*.key
+secrets/
+.env
+data
