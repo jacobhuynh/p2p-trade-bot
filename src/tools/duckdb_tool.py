@@ -61,14 +61,19 @@ def get_longshot_bias_stats(price_ceiling: int = 20, category_pattern: str = "KX
                 WHERE status = 'finalized'
                   AND result IN ('yes', 'no')
                   AND ticker LIKE '{category_pattern}'
+            ),
+            filtered_trades AS (
+                SELECT t.yes_price, m.result
+                FROM read_parquet('{_TRADES}') t
+                INNER JOIN resolved m ON t.ticker = m.ticker
+                WHERE t.yes_price <= {price_ceiling}
+                  AND t.taker_side = 'yes'
             )
             SELECT
-                AVG(CASE WHEN m.result = 'no' THEN 1.0 ELSE 0.0 END) AS no_win_rate,
-                AVG(t.yes_price) AS avg_price,
+                AVG(CASE WHEN result = 'no' THEN 1.0 ELSE 0.0 END) AS no_win_rate,
+                AVG(yes_price) AS avg_price,
                 COUNT(*) AS sample_size
-            FROM read_parquet('{_TRADES}') t
-            INNER JOIN resolved m ON t.ticker = m.ticker
-            WHERE t.yes_price <= {price_ceiling}
+            FROM filtered_trades
         """).fetchone()
 
         if result and result[2] > 0:
@@ -99,13 +104,18 @@ def get_price_bucket_edge(price: int, action: str, category_pattern: str = "KXNB
                 WHERE status = 'finalized'
                   AND result IN ('yes', 'no')
                   AND ticker LIKE '{category_pattern}'
+            ),
+            filtered_trades AS (
+                SELECT t.ticker, t.taker_side, m.result
+                FROM read_parquet('{_TRADES}') t
+                INNER JOIN resolved m ON t.ticker = m.ticker
+                WHERE t.yes_price = {price}
+                  AND t.taker_side = '{bet_side}'
             )
             SELECT
-                AVG(CASE WHEN m.result = '{bet_side}' THEN 1.0 ELSE 0.0 END) AS actual_win_rate,
+                AVG(CASE WHEN result = '{bet_side}' THEN 1.0 ELSE 0.0 END) AS actual_win_rate,
                 COUNT(*) AS sample_size
-            FROM read_parquet('{_TRADES}') t
-            INNER JOIN resolved m ON t.ticker = m.ticker
-            WHERE t.yes_price = {price}
+            FROM filtered_trades
         """).fetchone()
 
         if result and result[1] > 0:

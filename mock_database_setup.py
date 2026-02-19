@@ -264,7 +264,7 @@ def generate_markets() -> pd.DataFrame:
                     })
 
     df = pd.DataFrame(markets).drop_duplicates(subset=["ticker"])
-    print(f"  ✓ {len(df):,} markets")
+    print(f"  OK {len(df):,} markets")
     return df
 
 
@@ -286,13 +286,17 @@ def generate_trades(markets_df: pd.DataFrame, target: int = 400_000) -> pd.DataF
         close_t = pd.Timestamp(mkt["close_time"])
         last    = int(mkt["last_price"])
 
-        true_prob = (last / 100.0 + (0.95 if result == "yes" else 0.05)) / 2
+        # Generate trades based on market price with realistic variance
+        # Do NOT use the known result to bias prices - that creates hindsight bias
+        base_prob = last / 100.0
 
         for _ in range(n):
             t = random.random()
-            drift_target = 0.95 if result == "yes" else 0.05
-            price_center = true_prob * (1 - t**2) + drift_target * t**2
-            price_center += random.gauss(0, 0.04 * (1 - t))
+            # Price drifts around the market's implied probability with realistic variance
+            # Add some mean reversion toward the market price, but with significant noise
+            price_center = base_prob + random.gauss(0, 0.15)  # 15% std dev for realistic variance
+            # Clamp to reasonable bounds
+            price_center = max(0.01, min(0.99, price_center))
             yp = max(1, min(99, round(price_center * 100)))
 
             trades.append({
@@ -310,7 +314,7 @@ def generate_trades(markets_df: pd.DataFrame, target: int = 400_000) -> pd.DataF
             })
 
     df = pd.DataFrame(trades)
-    print(f"  ✓ {len(df):,} trades")
+    print(f"  OK {len(df):,} trades")
     return df
 
 
@@ -330,7 +334,7 @@ def save(markets_df, trades_df):
         )
         p = base / "markets" / f"nba_markets_{season}.parquet"
         markets_df[mask].to_parquet(p, index=False)
-        print(f"    ✓ {p}  ({mask.sum():,} rows)")
+        print(f"    OK {p}  ({mask.sum():,} rows)")
 
     for season in NBA_SEASONS:
         season_tickers = markets_df[
@@ -339,7 +343,7 @@ def save(markets_df, trades_df):
         mask = trades_df["ticker"].isin(season_tickers)
         p = base / "trades" / f"nba_trades_{season}.parquet"
         trades_df[mask].to_parquet(p, index=False)
-        print(f"    ✓ {p}  ({mask.sum():,} rows)")
+        print(f"    OK {p}  ({mask.sum():,} rows)")
 
 
 # ─────────────────────────────────────────────
@@ -358,7 +362,7 @@ def verify():
         FROM 'data/kalshi/markets/*.parquet'
         LIMIT 2
     """).df()
-    print(f"  ✓ Markets schema: {list(result.columns)}")
+    print(f"  OK Markets schema: {list(result.columns)}")
 
     result = con.execute("""
         SELECT trade_id, ticker, count, yes_price, no_price, taker_side,
@@ -366,7 +370,7 @@ def verify():
         FROM 'data/kalshi/trades/*.parquet'
         LIMIT 2
     """).df()
-    print(f"  ✓ Trades schema:  {list(result.columns)}")
+    print(f"  OK Trades schema:  {list(result.columns)}")
 
     result = con.execute("""
         WITH resolved AS (
@@ -384,7 +388,7 @@ def verify():
         INNER JOIN resolved m ON t.ticker = m.ticker
         LIMIT 3
     """).df()
-    print(f"  ✓ Join query: {len(result)} rows")
+    print(f"  OK Join query: {len(result)} rows")
 
     result = con.execute("""
         SELECT
@@ -394,16 +398,16 @@ def verify():
         GROUP BY category
         ORDER BY market_count DESC
     """).df()
-    print(f"  ✓ Categories: {result.to_dict(orient='records')}")
+    print(f"  OK Categories: {result.to_dict(orient='records')}")
 
     result = con.execute("""
         SELECT ticker, title, yes_sub_title, status, result
         FROM 'data/kalshi/markets/*.parquet'
         LIMIT 5
     """).df()
-    print(f"  ✓ Sample markets:\n{result.to_string()}")
+    print(f"  OK Sample markets:\n{result.to_string()}")
 
-    print("\n  All checks passed ✓")
+    print("\n  All checks passed OK")
 
 
 # ─────────────────────────────────────────────

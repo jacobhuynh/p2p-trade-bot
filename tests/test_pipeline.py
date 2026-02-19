@@ -11,7 +11,12 @@ Run modes:
 
 import json
 import sys
+from pathlib import Path
 from unittest.mock import patch
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 # ─────────────────────────────────────────────
 # MOCK TRADE PAYLOADS
@@ -159,7 +164,7 @@ def print_section(title):
 
 def print_decision(decision):
     status = decision.get("status")
-    emoji  = {"APPROVED": "✅", "VETOED": "🚫", "PASS": "⏭️"}.get(status, "❓")
+    emoji  = {"APPROVED": "OK", "VETOED": "VETO", "PASS": "PASS"}.get(status, "?")
     print(f"\n{emoji} Status:     {status}")
     print(f"   Action:     {decision.get('action')}")
     print(f"   Confidence: {decision.get('confidence')}")
@@ -199,25 +204,25 @@ def test_bouncer_filters():
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET):
         result = process_trade(VALID_NBA_LONGSHOT_YES)
         assert result is not None and result["action"] == "BET_NO"
-        print("✅ NBA longshot YES (14c) → BET_NO")
+        print("OK NBA longshot YES (14c) -> BET_NO")
 
         result = process_trade(VALID_NBA_LONGSHOT_NO)
         assert result is not None and result["action"] == "BET_YES"
-        print("✅ NBA longshot NO (86c) → BET_YES")
+        print("OK NBA longshot NO (86c) -> BET_YES")
 
         result = process_trade(INVALID_NBA_MIDDLE_PRICE)
         assert result is None
-        print("✅ NBA middle price (55c) → rejected")
+        print("OK NBA middle price (55c) -> rejected")
 
         result = process_trade(INVALID_NON_NBA)
         assert result is None
-        print("✅ Non-NBA ticker → rejected")
+        print("OK Non-NBA ticker -> rejected")
 
         result = process_trade(INVALID_EMPTY)
         assert result is None
-        print("✅ Empty payload → rejected")
+        print("OK Empty payload -> rejected")
 
-    print("\n✅ All bouncer tests passed.")
+    print("\nOK All bouncer tests passed.")
 
 
 # ─────────────────────────────────────────────
@@ -231,13 +236,13 @@ def test_quant_price_bucket_query():
 
     edge = get_price_bucket_edge(14, "BET_NO")
     assert "edge" in edge or "error" in edge
-    print(f"✅ Price bucket edge at 14c BET_NO: {edge}")
+    print(f"OK Price bucket edge at 14c BET_NO: {edge}")
 
     bias = get_longshot_bias_stats(14)
     assert "no_win_rate" in bias or "error" in bias
-    print(f"✅ Longshot bias stats at <=14c: {bias}")
+    print(f"OK Longshot bias stats at <=14c: {bias}")
 
-    print("\n✅ All quant price bucket tests passed.")
+    print("\nOK All quant price bucket tests passed.")
 
 
 # ─────────────────────────────────────────────
@@ -264,17 +269,22 @@ def test_pipeline_approved():
         assert decision["kelly_fraction"]     >  0
         assert decision["critic"]["decision"] == "APPROVE"
 
-    print("\n✅ Approved pipeline test passed.")
+    print("\nOK Approved pipeline test passed.")
 
 
 def test_pipeline_vetoed_contamination():
     from src.pipeline.bouncer import process_trade
     from src.agents.orchestrator import LeadAnalyst
+    from langchain_core.messages import AIMessage
 
     print_section("PIPELINE TEST — VETOED (data contamination)")
 
+    # Mock orchestrator LLM to return READY so critic gets called
+    mock_orchestrator_response = AIMessage(content='{"status": "READY", "reason": "EDGE_CONFIRMED verdict with sufficient sample size"}')
+
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
          patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_CONTAMINATED), \
+         patch("langchain_anthropic.ChatAnthropic.invoke", return_value=mock_orchestrator_response), \
          patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_veto_contamination):
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
@@ -285,7 +295,7 @@ def test_pipeline_vetoed_contamination():
         assert decision["action"]             == "PASS"
         assert decision["critic"]["decision"] == "VETO"
 
-    print("\n✅ Contamination veto test passed.")
+    print("\nOK Contamination veto test passed.")
 
 
 def test_pipeline_pass_no_edge():
@@ -306,7 +316,7 @@ def test_pipeline_pass_no_edge():
         assert decision["action"] == "PASS"
         mock_critic.assert_not_called()
 
-    print("\n✅ No edge pass test passed.")
+    print("\nOK No edge pass test passed.")
 
 
 def test_pipeline_pass_insufficient_data():
@@ -326,7 +336,7 @@ def test_pipeline_pass_insufficient_data():
         assert decision["status"] == "PASS"
         mock_critic.assert_not_called()
 
-    print("\n✅ Insufficient data pass test passed.")
+    print("\nOK Insufficient data pass test passed.")
 
 
 def test_pipeline_vetoed_liquidity():
@@ -348,7 +358,7 @@ def test_pipeline_vetoed_liquidity():
         assert "volume" in decision["critic"]["veto_reason"].lower() or \
                "liquid"  in decision["critic"]["veto_reason"].lower()
 
-    print("\n✅ Liquidity veto test passed.")
+    print("\nOK Liquidity veto test passed.")
 
 
 def test_pipeline_weak_edge():
@@ -368,7 +378,7 @@ def test_pipeline_weak_edge():
         assert decision["status"]     in ("APPROVED", "PASS")
         assert decision["confidence"] in ("MEDIUM", "LOW")
 
-    print("\n✅ Weak edge test passed.")
+    print("\nOK Weak edge test passed.")
 
 
 # ─────────────────────────────────────────────
@@ -385,15 +395,15 @@ def test_pipeline_live():
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         assert trade_packet is not None
 
-        print(f"📦 Trade Packet:\n{json.dumps(trade_packet, indent=2)}")
+        print(f"[Trade Packet] Trade Packet:\n{json.dumps(trade_packet, indent=2)}")
 
         decision = LeadAnalyst().analyze_signal(trade_packet)
-        print(f"\n🤖 Full Decision:\n{json.dumps(decision, indent=2)}")
+        print(f"\n[Decision] Full Decision:\n{json.dumps(decision, indent=2)}")
         print_decision(decision)
 
         assert decision["status"] in ("APPROVED", "VETOED", "PASS")
 
-    print("\n✅ Live pipeline test complete.")
+    print("\nOK Live pipeline test complete.")
 
 
 # ─────────────────────────────────────────────
@@ -413,8 +423,8 @@ if __name__ == "__main__":
     if "--live" in sys.argv:
         test_pipeline_live()
     else:
-        print("\n💡 Tip: run with --live to test against real DB and LLM")
+        print("\n[Tip] Run with --live to test against real DB and LLM")
 
     print(f"\n{'='*60}")
-    print("  All tests passed ✅")
+    print("  All tests passed OK")
     print(f"{'='*60}")

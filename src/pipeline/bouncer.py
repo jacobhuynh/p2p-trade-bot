@@ -42,20 +42,20 @@ def process_trade(trade_data):
         return None
 
     # --- FILTER 1: Longshot Bias (both sides) ---
-    is_longshot_yes = yes_price <= 20   # YES is the underdog → bet NO
-    is_longshot_no  = yes_price >= 80   # NO is the underdog  → bet YES
+    is_longshot_yes = yes_price <= 20   # YES is the underdog -> bet NO
+    is_longshot_no  = yes_price >= 80   # NO is the underdog  -> bet YES
 
     if not (is_longshot_yes or is_longshot_no):
-        price_bar = "█" * (yes_price // 10) + "░" * (10 - yes_price // 10)
-        print(f"\n❌ SKIP | {ticker:<40} | {yes_price:>3}¢ [{price_bar}] (no longshot detected)")
+        price_bar = "#" * (yes_price // 10) + "." * (10 - yes_price // 10)
+        print(f"\n[SKIP] | {ticker:<40} | {yes_price:>3}c [{price_bar}] (no longshot detected)")
         return None
 
     # These are now guaranteed to be defined since we passed the filter above
     action = "BET_NO" if is_longshot_yes else "BET_YES"
     reason = (
-        f"Longshot Bias — fading overpriced YES underdog at {yes_price}¢"
+        f"Longshot Bias - fading overpriced YES underdog at {yes_price}c"
         if is_longshot_yes else
-        f"Longshot Bias — fading overpriced NO underdog at {yes_price}¢"
+        f"Longshot Bias - fading overpriced NO underdog at {yes_price}c"
     )
 
     # --- ENRICH: Fetch market details from REST API ---
