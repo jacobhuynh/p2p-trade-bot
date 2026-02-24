@@ -4,19 +4,41 @@ tests/test_pipeline.py
 Tests the full pipeline: bouncer -> quant -> orchestrator -> critic
 
 Run modes:
-    pytest tests/test_pipeline.py -v -s          # mocked (fast, no API calls)
-    python tests/test_pipeline.py                # mocked (fast, no API calls)
-    python tests/test_pipeline.py --live         # real DB + real LLM calls
+    pytest tests/test_pipeline.py -v -s          # rule mode (fast, no API calls)
+    python tests/test_pipeline.py                # rule mode (fast, no API calls)
+    LLM_MODE=anthropic python tests/test_pipeline.py --live  # real DB + real LLM
+
+LLM_MODE defaults to "rule" so the suite passes with zero API keys.
 """
 
+import csv
 import json
+import os
+import shutil
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+# ── Default to rule mode before any project imports ──────────────────────────
+# Set before importing src modules so config.py picks it up correctly.
+os.environ.setdefault("LLM_MODE", "rule")
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+from src.config import LLM_MODE  # noqa: E402
+
+# ── Patch-target routing based on active mode ─────────────────────────────────
+# In rule mode we patch the rule agent classes; in anthropic mode the LLM agents.
+if LLM_MODE == "rule":
+    QUANT_ANALYZE_PATCH = "src.agents.rule_agents.RuleQuantAgent.analyze"
+    CRITIC_REVIEW_PATCH = "src.agents.rule_agents.RuleCriticAgent.review"
+else:
+    QUANT_ANALYZE_PATCH = "src.agents.quant.QuantAgent.analyze"
+    CRITIC_REVIEW_PATCH = "src.agents.critic.CriticAgent.review"
 
 # ─────────────────────────────────────────────
 # MOCK TRADE PAYLOADS
@@ -162,10 +184,11 @@ def print_section(title):
     print(f"  {title}")
     print(f"{'='*60}")
 
+
 def print_decision(decision):
     status = decision.get("status")
-    emoji  = {"APPROVED": "OK", "VETOED": "VETO", "PASS": "PASS"}.get(status, "?")
-    print(f"\n{emoji} Status:     {status}")
+    label  = {"APPROVED": "OK", "VETOED": "VETO", "PASS": "PASS"}.get(status, "?")
+    print(f"\n{label} Status:     {status}")
     print(f"   Action:     {decision.get('action')}")
     print(f"   Confidence: {decision.get('confidence')}")
     print(f"   Edge:       {decision.get('edge')}")
@@ -255,37 +278,71 @@ def test_pipeline_approved():
 
     print_section("PIPELINE TEST — APPROVED")
 
+    # Patch PaperTradeManager so this unit test has no file-system side effects.
+    # The dedicated test_paper_trading_e2e test verifies real file output.
+    mock_paper = MagicMock()
+    mock_paper.return_value.execute.return_value = {
+        "status": "FILLED", "contracts": 1, "cash_after": 999.14,
+    }
+
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_EDGE_CONFIRMED), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_approve):
+         patch(QUANT_ANALYZE_PATCH,  return_value=MOCK_QUANT_EDGE_CONFIRMED), \
+         patch(CRITIC_REVIEW_PATCH,  side_effect=_mock_critic_approve), \
+         patch("src.execution.trade_manager.PaperTradeManager", mock_paper):
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
         print_decision(decision)
 
-        assert decision["status"]             == "APPROVED"
-        assert decision["action"]             == "BET_NO"
-        assert decision["confidence"]         in ("HIGH", "MEDIUM")
-        assert decision["kelly_fraction"]     >  0
-        assert decision["critic"]["decision"] == "APPROVE"
+        assert decision["status"]              == "APPROVED"
+        assert decision["action"]              == "BET_NO"
+        assert decision["confidence"]          in ("HIGH", "MEDIUM")
+        assert decision["kelly_fraction"]      >  0
+        assert decision["critic"]["decision"]  == "APPROVE"
+        assert decision["execution"]["status"] == "FILLED"
 
     print("\nOK Approved pipeline test passed.")
 
 
 def test_pipeline_vetoed_contamination():
+    """
+    Contamination path: quant returns win_rate=1.0.
+
+    In rule mode  — the rule orchestrator issues READY (gap=0.14, n=7850),
+                    then the rule critic detects win_rate=1.0 and VETOs
+                    without any LLM call.
+    In anthropic mode — the LLM orchestrator is mocked to return READY,
+                        then the LLM critic is mocked to VETO.
+    """
     from src.pipeline.bouncer import process_trade
     from src.agents.orchestrator import LeadAnalyst
-    from langchain_core.messages import AIMessage
 
     print_section("PIPELINE TEST — VETOED (data contamination)")
 
-    # Mock orchestrator LLM to return READY so critic gets called
-    mock_orchestrator_response = AIMessage(content='{"status": "READY", "reason": "EDGE_CONFIRMED verdict with sufficient sample size"}')
+    extra_patches = []
+    if LLM_MODE != "rule":
+        # In LLM mode we need to mock the orchestrator LLM response
+        from langchain_core.messages import AIMessage
+        mock_llm_resp = AIMessage(
+            content='{"status": "READY", "reason": "EDGE_CONFIRMED verdict with sufficient sample size"}'
+        )
+        extra_patches.append(
+            patch("langchain_anthropic.ChatAnthropic.invoke", return_value=mock_llm_resp)
+        )
+        extra_patches.append(
+            patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_veto_contamination)
+        )
+        # In rule mode the critic runs naturally and VETOs on win_rate=1.0 — no patch needed.
 
-    with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_CONTAMINATED), \
-         patch("langchain_anthropic.ChatAnthropic.invoke", return_value=mock_orchestrator_response), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_veto_contamination):
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET)
+        )
+        stack.enter_context(
+            patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_CONTAMINATED)
+        )
+        for p in extra_patches:
+            stack.enter_context(p)
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
@@ -305,8 +362,8 @@ def test_pipeline_pass_no_edge():
     print_section("PIPELINE TEST — PASS (no edge)")
 
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_NO_EDGE), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_approve) as mock_critic:
+         patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_NO_EDGE), \
+         patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_approve) as mock_critic:
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
@@ -326,8 +383,8 @@ def test_pipeline_pass_insufficient_data():
     print_section("PIPELINE TEST — PASS (insufficient data)")
 
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_INSUFFICIENT), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_approve) as mock_critic:
+         patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_INSUFFICIENT), \
+         patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_approve) as mock_critic:
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
@@ -346,8 +403,8 @@ def test_pipeline_vetoed_liquidity():
     print_section("PIPELINE TEST — VETOED (illiquid market)")
 
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_EDGE_CONFIRMED), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_veto_liquidity):
+         patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_EDGE_CONFIRMED), \
+         patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_veto_liquidity):
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
@@ -355,8 +412,10 @@ def test_pipeline_vetoed_liquidity():
 
         assert decision["status"]             == "VETOED"
         assert decision["critic"]["decision"] == "VETO"
-        assert "volume" in decision["critic"]["veto_reason"].lower() or \
-               "liquid"  in decision["critic"]["veto_reason"].lower()
+        assert (
+            "volume"  in decision["critic"]["veto_reason"].lower() or
+            "liquid"  in decision["critic"]["veto_reason"].lower()
+        )
 
     print("\nOK Liquidity veto test passed.")
 
@@ -368,17 +427,93 @@ def test_pipeline_weak_edge():
     print_section("PIPELINE TEST — WEAK EDGE")
 
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
-         patch("src.agents.quant.QuantAgent.analyze",     return_value=MOCK_QUANT_EDGE_WEAK), \
-         patch("src.agents.critic.CriticAgent.review",    side_effect=_mock_critic_approve):
+         patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_EDGE_WEAK), \
+         patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_approve):
 
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         decision     = LeadAnalyst().analyze_signal(trade_packet)
         print_decision(decision)
 
+        # EDGE_WEAK with sample_size=75 < MIN_SAMPLE_SIZE → PASS (confidence=LOW)
         assert decision["status"]     in ("APPROVED", "PASS")
         assert decision["confidence"] in ("MEDIUM", "LOW")
 
     print("\nOK Weak edge test passed.")
+
+
+# ─────────────────────────────────────────────
+# PAPER TRADING E2E TEST
+# ─────────────────────────────────────────────
+
+def test_paper_trading_e2e():
+    """
+    End-to-end paper trading test.
+
+    Uses a fresh temp directory so the test is fully isolated from any
+    existing data/paper/ state.  Verifies:
+      - book.json is created and cash decreased
+      - trades.csv has at least 1 data row
+      - equity.csv has at least 1 data row
+      - decision["execution"] is present with status FILLED
+    """
+    from src.pipeline.bouncer import process_trade
+    from src.agents.orchestrator import LeadAnalyst
+
+    print_section("PAPER TRADING E2E TEST")
+
+    tmp_dir = tempfile.mkdtemp(prefix="p2p_paper_test_")
+    try:
+        # Redirect all paper files to the temp dir by overriding the env var.
+        # PaperTradeManager reads PAPER_DATA_DIR inside __init__, so this works.
+        with patch.dict(os.environ, {"PAPER_DATA_DIR": tmp_dir}), \
+             patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET), \
+             patch(QUANT_ANALYZE_PATCH, return_value=MOCK_QUANT_EDGE_CONFIRMED), \
+             patch(CRITIC_REVIEW_PATCH, side_effect=_mock_critic_approve):
+
+            trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
+            decision     = LeadAnalyst().analyze_signal(trade_packet)
+            print_decision(decision)
+
+        # ── Verify decision ──────────────────────────────────────────────
+        assert decision["status"]              == "APPROVED"
+        assert "execution"                     in decision
+        assert decision["execution"]["status"] == "FILLED"
+        assert decision["execution"]["cash_after"] < decision["execution"]["cash_before"]
+
+        # ── Verify book.json ─────────────────────────────────────────────
+        book_path = Path(tmp_dir) / "book.json"
+        assert book_path.exists(), "book.json should have been created"
+        book = json.loads(book_path.read_text())
+        assert book["cash"] < 1000.0, (
+            f"Cash should have decreased from 1000.0 after a trade, got {book['cash']}"
+        )
+        assert len(book["positions"]) >= 1, "At least one open position expected"
+
+        # ── Verify trades.csv ────────────────────────────────────────────
+        trades_path = Path(tmp_dir) / "trades.csv"
+        assert trades_path.exists(), "trades.csv should have been created"
+        with open(trades_path) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) >= 1, "trades.csv should have at least 1 data row"
+        assert rows[0]["side"]   in ("YES", "NO")
+        assert rows[0]["action"] == "BET_NO"   # longshot YES → BET_NO
+
+        # ── Verify equity.csv ────────────────────────────────────────────
+        equity_path = Path(tmp_dir) / "equity.csv"
+        assert equity_path.exists(), "equity.csv should have been created"
+        with open(equity_path) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) >= 1, "equity.csv should have at least 1 data row"
+        assert float(rows[0]["cash"]) < 1000.0, "Equity cash column should show reduction"
+
+        print(f"   book.json cash:     {book['cash']}")
+        print(f"   trades.csv rows:    {len(rows)}")
+        print(f"   equity.csv cash[0]: {rows[0]['cash']}")
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print("\nOK Paper trading e2e test passed.")
 
 
 # ─────────────────────────────────────────────
@@ -389,16 +524,17 @@ def test_pipeline_live():
     from src.pipeline.bouncer import process_trade
     from src.agents.orchestrator import LeadAnalyst
 
-    print_section("LIVE PIPELINE TEST (real DB + real LLM)")
+    print_section(f"LIVE PIPELINE TEST (real DB + {LLM_MODE} agents)")
 
     with patch("src.pipeline.bouncer.get_market_details", return_value=MOCK_MARKET):
         trade_packet = process_trade(VALID_NBA_LONGSHOT_YES)
         assert trade_packet is not None
 
-        print(f"[Trade Packet] Trade Packet:\n{json.dumps(trade_packet, indent=2)}")
+        import json
+        print(f"[Trade Packet]\n{json.dumps(trade_packet, indent=2)}")
 
         decision = LeadAnalyst().analyze_signal(trade_packet)
-        print(f"\n[Decision] Full Decision:\n{json.dumps(decision, indent=2)}")
+        print(f"\n[Decision]\n{json.dumps(decision, indent=2)}")
         print_decision(decision)
 
         assert decision["status"] in ("APPROVED", "VETOED", "PASS")
@@ -411,6 +547,8 @@ def test_pipeline_live():
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    print(f"\n[LLM_MODE = {LLM_MODE}]")
+
     test_bouncer_filters()
     test_quant_price_bucket_query()
     test_pipeline_approved()
@@ -419,12 +557,13 @@ if __name__ == "__main__":
     test_pipeline_pass_insufficient_data()
     test_pipeline_vetoed_liquidity()
     test_pipeline_weak_edge()
+    test_paper_trading_e2e()
 
     if "--live" in sys.argv:
         test_pipeline_live()
     else:
-        print("\n[Tip] Run with --live to test against real DB and LLM")
+        print("\n[Tip] Run with --live to also exercise real DB queries")
 
     print(f"\n{'='*60}")
-    print("  All tests passed OK")
+    print(f"  All tests passed  (mode: {LLM_MODE})")
     print(f"{'='*60}")

@@ -16,9 +16,6 @@ Real prediction market edges are small:
 import json
 import re
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from src.tools.duckdb_tool import (
     get_historical_win_rate,
     get_longshot_bias_stats,
@@ -76,12 +73,17 @@ difference between actual outcomes and implied probability.
 
 class QuantAgent:
     def __init__(self):
+        # Lazy import — only load langchain_anthropic when this class is instantiated.
+        # This keeps rule mode fully independent of the package.
+        from langchain_anthropic import ChatAnthropic
         self.llm = ChatAnthropic(
             model="claude-sonnet-4-6",
             temperature=0,
         )
 
     def analyze(self, trade_packet: dict) -> dict:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         price  = trade_packet.get("market_price")
         action = trade_packet.get("action")
 

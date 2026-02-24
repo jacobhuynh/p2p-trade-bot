@@ -90,10 +90,13 @@ PROP_TYPES = [
      "{player} scores 25+ points",
      (0.30, 0.55)),
 
+    # PTS30 range lowered to (0.04, 0.22): true_probs in the longshot zone.
+    # Combined with spread_from_prob bias this gives market prices 8–20c while
+    # true_prob stays low — the calibration gap the BET_NO strategy exploits.
     ("KXNBASGPROP", "PTS", 30,
      "{player} Over 29.5 points",
      "{player} scores 30+ points",
-     (0.18, 0.38)),
+     (0.04, 0.22)),
 
     # Player assists props
     ("KXNBASGPROP", "AST", 6,
@@ -101,10 +104,11 @@ PROP_TYPES = [
      "{player} records 6+ assists",
      (0.40, 0.60)),
 
+    # AST10 range similarly lowered to (0.04, 0.22) for the same reason.
     ("KXNBASGPROP", "AST", 10,
      "{player} Over 9.5 assists",
      "{player} records 10+ assists",
-     (0.20, 0.40)),
+     (0.04, 0.22)),
 
     # Player rebounds props
     ("KXNBASGPROP", "REB", 8,
@@ -130,6 +134,16 @@ def date_slug(dt: datetime) -> str:
 
 def spread_from_prob(true_prob: float, noise: float = 0.03) -> tuple:
     market_prob = max(0.03, min(0.97, true_prob + random.gauss(0, noise)))
+
+    # Inject longshot bias: in real prediction markets, YES contracts with low
+    # true probability are systematically overpriced (bettors over-weight long
+    # shots). Replicate that by inflating market_prob above true_prob linearly
+    # for true_prob <= 0.25, up to +12 percentage points at true_prob = 0.
+    # This creates the calibration gap that the BET_NO strategy exploits.
+    if true_prob <= 0.25:
+        bias = 0.12 * (0.25 - true_prob) / 0.25   # 0 at tp=0.25, +0.12 at tp=0
+        market_prob = max(0.03, min(0.97, market_prob + bias))
+
     yes_mid = round(market_prob * 100)
     spread = random.randint(1, 3)
     yes_bid = max(1,  yes_mid - spread)
@@ -292,10 +306,12 @@ def generate_trades(markets_df: pd.DataFrame, target: int = 400_000) -> pd.DataF
 
         for _ in range(n):
             t = random.random()
-            # Price drifts around the market's implied probability with realistic variance
-            # Add some mean reversion toward the market price, but with significant noise
-            price_center = base_prob + random.gauss(0, 0.15)  # 15% std dev for realistic variance
-            # Clamp to reasonable bounds
+            # In real prediction markets, trades occur near the current market
+            # price (bid-ask spread is a few cents). Use std=0.04 so each
+            # market's trades stay in its own price neighbourhood — this
+            # prevents high-volume markets from contaminating adjacent price
+            # buckets used by the quant calibration queries.
+            price_center = base_prob + random.gauss(0, 0.04)  # ±4% realistic spread
             price_center = max(0.01, min(0.99, price_center))
             yp = max(1, min(99, round(price_center * 100)))
 

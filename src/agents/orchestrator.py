@@ -7,17 +7,15 @@ final approval before returning an execution-ready decision object.
 
 Pipeline:
   trade_packet → quant (calibration gap) → orchestrator (READY/PASS) → critic (APPROVE/VETO)
+
+Agent selection is controlled by LLM_MODE (src/config.py):
+  LLM_MODE=rule       — deterministic rule-based agents (default, no API keys needed)
+  LLM_MODE=anthropic  — ChatAnthropic-powered agents (requires ANTHROPIC_API_KEY)
 """
 
 import json
 import re
 from datetime import datetime, timezone
-
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from src.agents.quant import QuantAgent
-from src.agents.critic import CriticAgent
 
 # ─────────────────────────────────────────────
 # THRESHOLDS
@@ -26,7 +24,7 @@ from src.agents.critic import CriticAgent
 # ─────────────────────────────────────────────
 
 MIN_EDGE_HIGH      = 0.02    # 2%+ calibration gap = strong edge
-MIN_EDGE_MEDIUM    = 0.008   # 0.8%+ calibration gap = weak but worth flagging
+MIN_EDGE_MEDIUM    = 0.008   # 0.8%+ calibration gap = weak but real
 MIN_SAMPLE_SIZE    = 200     # need meaningful history to trust the gap
 MIN_VOLUME         = 5000    # minimum market volume for liquidity
 KELLY_FRACTION_CAP = 0.15
@@ -48,7 +46,8 @@ def _confidence(edge: float, sample_size: int) -> str:
     return "LOW"
 
 
-SYSTEM_PROMPT = """You are a lead trading analyst for a Kalshi prediction market trading bot.
+# System prompt used only in LLM mode
+_SYSTEM_PROMPT = """You are a lead trading analyst for a Kalshi prediction market trading bot.
 You receive a trade signal and a quantitative calibration gap analysis.
 Make the preliminary READY or PASS decision.
 
@@ -71,19 +70,77 @@ Decision rules:
 
 class LeadAnalyst:
     def __init__(self):
-        self.role   = "Lead Trading Orchestrator"
-        self.quant  = QuantAgent()
-        self.critic = CriticAgent()
-        self.llm    = ChatAnthropic(
-            model="claude-sonnet-4-6",
-            temperature=0,
-        )
+        from src.config import LLM_MODE
 
+        self.role     = "Lead Trading Orchestrator"
+        self.llm_mode = LLM_MODE
+
+        if LLM_MODE == "rule":
+            # Zero external calls — import only local modules
+            from src.agents.rule_agents import RuleQuantAgent, RuleCriticAgent
+            self.quant  = RuleQuantAgent()
+            self.critic = RuleCriticAgent()
+            self.llm    = None
+        else:
+            # anthropic mode — lazy-import so missing package only fails here
+            from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
+            from src.agents.quant import QuantAgent
+            from src.agents.critic import CriticAgent
+            self.quant  = QuantAgent()
+            self.critic = CriticAgent()
+            self.llm    = ChatAnthropic(
+                model="claude-sonnet-4-6",
+                temperature=0,
+            )
+
+    # ── Internal: orchestrator decision step ────────────────────────────────
+    def _orchestrate(
+        self,
+        quant_report:    dict,
+        confidence:      str,
+        sample_size:     int,
+        calibration_gap,
+        trade_packet:    dict,
+    ) -> dict:
+        """Returns {"status": "READY"/"PASS", "reason": "..."}"""
+
+        if self.llm is None:
+            # Rule mode — pure Python logic, no network
+            from src.agents.rule_agents import rule_orchestrate
+            return rule_orchestrate(quant_report, confidence, sample_size, calibration_gap)
+
+        # ── LLM (anthropic) mode ─────────────────────────────────────────
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        ticker = trade_packet.get("ticker")
+        price  = trade_packet.get("market_price")
+        action = trade_packet.get("action")
+
+        human_msg = f"""Trade Signal:
+Ticker:     {ticker}
+Price:      {price}c
+Action:     {action}
+Confidence: {confidence}
+
+Quant Report:
+{json.dumps(quant_report, indent=2)}
+"""
+        try:
+            response = self.llm.invoke([
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(content=human_msg),
+            ])
+            clean = re.sub(r"```json|```", "", response.content).strip()
+            return json.loads(clean)
+        except Exception as e:
+            return {"status": "PASS", "reason": f"Orchestrator error: {str(e)}"}
+
+    # ── Public: full pipeline ────────────────────────────────────────────────
     def analyze_signal(self, trade_packet: dict) -> dict:
         """
         Full pipeline:
           1. Quant agent — calibration gap analysis by price bucket
-          2. Orchestrator LLM — preliminary READY/PASS
+          2. Orchestrator — preliminary READY/PASS (rule or LLM)
           3. Critic agent — adversarial APPROVE/VETO (only on READY)
 
         Final status values:
@@ -99,33 +156,15 @@ class LeadAnalyst:
         # ── Step 1: Quant calibration gap analysis ──────────────────────
         quant_report = self.quant.analyze(trade_packet)
 
-        # Always use calibration_gap as the edge metric — it's the correct one.
-        # historical_edge can be contaminated by the yes_price value itself.
         edge        = quant_report.get("calibration_gap")
         sample_size = quant_report.get("sample_size", 0)
         confidence  = _confidence(edge or 0, sample_size)
         kelly       = _kelly(edge or 0)
 
         # ── Step 2: Orchestrator preliminary decision ───────────────────
-        human_msg = f"""Trade Signal:
-Ticker:     {ticker}
-Price:      {price}c
-Action:     {action}
-Confidence: {confidence}
-
-Quant Report:
-{json.dumps(quant_report, indent=2)}
-"""
-        try:
-            response = self.llm.invoke([
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=human_msg),
-            ])
-            clean  = re.sub(r"```json|```", "", response.content).strip()
-            ruling = json.loads(clean)
-        except Exception as e:
-            ruling = {"status": "PASS", "reason": f"Orchestrator error: {str(e)}"}
-
+        ruling = self._orchestrate(
+            quant_report, confidence, sample_size, edge, trade_packet
+        )
         preliminary_status = ruling.get("status", "PASS")
 
         # ── Base decision object ────────────────────────────────────────
@@ -146,5 +185,16 @@ Quant Report:
         # ── Step 3: Critic review (only on READY) ──────────────────────
         if preliminary_status == "READY":
             decision = self.critic.review(trade_packet, decision)
+
+        # ── Step 4: Execution (only on APPROVED) ────────────────────────
+        if decision.get("status") == "APPROVED" and decision.get("action") in ("BET_YES", "BET_NO"):
+            from src.config import EXECUTION_MODE
+            if EXECUTION_MODE == "paper":
+                from src.execution.trade_manager import PaperTradeManager
+                report = PaperTradeManager().execute(decision, trade_packet)
+                decision["execution"] = report
+            elif EXECUTION_MODE == "live":
+                from src.execution.trade_manager import LiveTradeManager
+                LiveTradeManager().execute(decision, trade_packet)
 
         return decision

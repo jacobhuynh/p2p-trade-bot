@@ -19,9 +19,6 @@ Output: APPROVE or VETO with a specific reason.
 import json
 import re
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
 SYSTEM_PROMPT = """You are an adversarial trading critic for a Kalshi prediction market bot.
 Your ONLY job is to find legitimate reasons to VETO a trade.
 
@@ -82,6 +79,9 @@ You should APPROVE more often than you VETO — only hard block on clear issues.
 
 class CriticAgent:
     def __init__(self):
+        # Lazy import — only load langchain_anthropic when this class is instantiated.
+        # This keeps rule mode fully independent of the package.
+        from langchain_anthropic import ChatAnthropic
         self.llm = ChatAnthropic(
             model="claude-sonnet-4-6",
             temperature=0.2,  # Slightly higher than 0 — we want some creative skepticism
@@ -129,6 +129,7 @@ Find reasons to VETO this trade. Be specific.
 """
 
         try:
+            from langchain_core.messages import HumanMessage, SystemMessage
             response = self.llm.invoke([
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=human_msg),
