@@ -13,9 +13,9 @@ summary that incorporates the pre-computed numbers and any available live contex
 (ESPN game status, recent team records from nba_api).
 
 Real prediction market edges are small:
-  - 2%+ calibration gap = strong edge
-  - 0.8%+ calibration gap = weak but real
-  - <0.8% = noise, not tradeable
+  - 1.5%+ calibration gap = strong edge
+  - 0.75%+ calibration gap = weak but real
+  - <0.75% = noise, not tradeable
 """
 
 import json
@@ -83,10 +83,10 @@ class QuantAgent:
         if sample_size < 100 or calibration_gap is None:
             verdict      = "INSUFFICIENT_DATA"
             data_quality = "INSUFFICIENT"
-        elif calibration_gap > 0.02 and sample_size >= 200:
+        elif calibration_gap > 0.015 and sample_size >= 200:
             verdict      = "EDGE_CONFIRMED"
             data_quality = "SUFFICIENT"
-        elif calibration_gap > 0.008 and sample_size >= 100:
+        elif calibration_gap > 0.0075 and sample_size >= 100:
             verdict      = "EDGE_WEAK"
             data_quality = "SUFFICIENT"
         else:
@@ -158,4 +158,9 @@ Write a single-sentence qualitative summary.  Use the pre-computed values — do
             "summary":            summary,
             "game_context":       game_context,
             "team_stats":         team_stats,
+            # ── Raw query results — separate DuckDB queries, different population cuts ──
+            "price_bucket_edge":  edge_data,    # get_price_bucket_edge(price, action)
+            "longshot_bias":      bias_data,    # get_longshot_bias_stats(price)
+            "taker_win_rate":     win_data,     # get_historical_win_rate(price)
+            "inverse_bucket":     inverse_edge, # get_price_bucket_edge(100-price, opposite)
         }
