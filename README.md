@@ -22,16 +22,16 @@ All math is computed in Python from a local DuckDB database of historical Kalshi
 
 ```mermaid
 flowchart TD
-    WS["🌐 Kalshi WebSocket Stream\nRSA-PSS authenticated"]
-    ROUTER["Router\nclassify_market(ticker)"]
-    BOUNCER["Bouncer\nLongshot Filter\nYES ≤20¢ → BET_NO\nYES ≥80¢ → BET_YES\n+ REST Enrichment"]
-    QUANT["QuantAgent\nCalibration Gap Analysis\n+ ESPN live context\n+ nba_api team records\n(LLM writes summary only)"]
-    RESEARCH["[Research Agent]\nTODO: news · injuries\nline movement"]
-    ORCH["LeadAnalyst\nSynthesize → Trade Proposal\nREADY / PASS\nKelly fraction ≤ 15%"]
-    CRITIC["CriticAgent\nAdversarial Review\nQueries open portfolio\nAPPROVE / VETO"]
-    LOGGER["TradeLogger\nSQLite · data/live_trades.db\nstatus = PENDING_RESOLUTION"]
-    SETTLE["src/settle.py\nESPN scoreboard poll\nstatus = EVALUATED + P&L"]
-    PLACEHOLDER["◻ Placeholder\nprint one-liner · drop"]
+    WS["🌐 Kalshi WebSocket Stream<br/>RSA-PSS authenticated"]
+    ROUTER["Router<br/>classify_market(ticker)"]
+    BOUNCER["Bouncer — Longshot Filter<br/>YES ≤20¢ → BET_NO<br/>YES ≥80¢ → BET_YES<br/>+ Kalshi REST enrichment"]
+    QUANT["QuantAgent<br/>Calibration gap analysis<br/>+ ESPN live context<br/>+ nba_api team records"]
+    RESEARCH["[Research Agent]<br/>TODO: news · injuries<br/>line movement"]
+    ORCH["LeadAnalyst<br/>Synthesize → READY / PASS<br/>Kelly fraction ≤ 15%"]
+    CRITIC["CriticAgent<br/>Adversarial review<br/>Queries open portfolio<br/>APPROVE / VETO"]
+    LOGGER["TradeLogger<br/>SQLite · live_trades.db<br/>PENDING_RESOLUTION"]
+    SETTLE["src/settle.py<br/>ESPN scoreboard poll<br/>EVALUATED + P&L"]
+    PLACEHOLDER["◻ Placeholder<br/>print one-liner · drop"]
     DROPPED(("· dropped"))
     PASSD(("· PASS"))
     VETOD(("· VETOED"))
