@@ -38,6 +38,10 @@ np.random.seed(42)
 NBA_SEASONS = [2023, 2024, 2025]
 GAMES_PER_SEASON = 82  # per team, but we'll generate matchups per week
 
+# Longshot bias in player prop markets erodes as the market matures.
+# Game winner bias is held constant (structural retail psychology effect).
+SEASON_PROP_BIAS_SCALE = {2023: 1.0, 2024: 0.75, 2025: 0.45}
+
 # (last_name_slug, display_name, team)
 PLAYERS = [
     ("LEBRON",    "LeBron James",      "LAL"),
@@ -62,11 +66,12 @@ TEAMS = [
 
 # (series_prefix, stat_slug, threshold, title_template, yes_sub_template, true_prob_range)
 PROP_TYPES = [
-    # Game winner
+    # Game winner — range extended to 0.90 so some home teams are heavy favorites,
+    # making their away-team complements (0.10–0.40) land in the ≤20c longshot zone.
     ("KXNBAGAME", None, None,
      "{home} at {away} Winner?",
      "{home} wins",
-     (0.35, 0.68)),
+     (0.35, 0.90)),
 
     # Season win totals
     ("KXNBAWINS", None, 45,
@@ -132,16 +137,20 @@ def date_slug(dt: datetime) -> str:
     """Format datetime as YYMONDD, e.g. 26FEB19"""
     return dt.strftime("%y%b%d").upper()
 
-def spread_from_prob(true_prob: float, noise: float = 0.03) -> tuple:
+def spread_from_prob(true_prob: float, noise: float = 0.03, max_bias: float = 0.12) -> tuple:
     market_prob = max(0.03, min(0.97, true_prob + random.gauss(0, noise)))
 
     # Inject longshot bias: in real prediction markets, YES contracts with low
     # true probability are systematically overpriced (bettors over-weight long
-    # shots). Replicate that by inflating market_prob above true_prob linearly
-    # for true_prob <= 0.25, up to +12 percentage points at true_prob = 0.
-    # This creates the calibration gap that the BET_NO strategy exploits.
-    if true_prob <= 0.25:
-        bias = 0.12 * (0.25 - true_prob) / 0.25   # 0 at tp=0.25, +0.12 at tp=0
+    # shots). Replicate that by inflating market_prob above true_prob for
+    # true_prob <= 0.25, controlled by max_bias (0 = no bias).
+    #
+    # Quadratic decay (exponent 1.5) makes the bias steeper at very low prices
+    # and drops off quickly near the 20c boundary — producing meaningfully
+    # different calibration gaps at 5c vs 15c price buckets.
+    if true_prob <= 0.25 and max_bias > 0:
+        t = (0.25 - true_prob) / 0.25           # 1.0 at tp=0, 0.0 at tp=0.25
+        bias = max_bias * (t ** 1.5)
         market_prob = max(0.03, min(0.97, market_prob + bias))
 
     yes_mid = round(market_prob * 100)
@@ -161,6 +170,27 @@ def rand_volume(series: str) -> int:
     }
     lo, hi = ranges.get(series, (1000, 50000))
     return random.randint(lo, hi)
+
+
+def _market_max_bias(series: str, threshold, season: int) -> float:
+    """
+    Returns the maximum longshot bias (in probability units) for a given
+    market type and season.
+
+    - KXNBAGAME: constant 12pp — structural retail psychology effect
+    - KXNBASGPROP PTS30/AST10: erodes by season via SEASON_PROP_BIAS_SCALE
+    - KXNBAWINS: zero — season win totals are research-driven and efficiently priced
+    - Other KXNBASGPROP thresholds: zero — they don't land in the ≤20c zone anyway
+    """
+    if series == "KXNBAWINS":
+        return 0.0
+    if series == "KXNBASGPROP":
+        if threshold in (30, 10):
+            return 0.12 * SEASON_PROP_BIAS_SCALE[season]
+        return 0.0
+    if series == "KXNBAGAME":
+        return 0.12
+    return 0.0
 
 
 # ─────────────────────────────────────────────
@@ -210,6 +240,7 @@ def generate_markets() -> pd.DataFrame:
 
                     else:
                         # Game winner — generate both sides (home and away)
+                        mb = _market_max_bias(series, threshold, season)
                         for side, side_team, side_prob_range in [
                             ("home", home, prob_range),
                             ("away", away, (1 - prob_range[1], 1 - prob_range[0])),
@@ -221,7 +252,7 @@ def generate_markets() -> pd.DataFrame:
                             event_t = f"{series}-{dslug}{home}{away}"
 
                             tp = random.uniform(*side_prob_range)
-                            yb, ya, nb, na, last, market_prob = spread_from_prob(tp)
+                            yb, ya, nb, na, last, market_prob = spread_from_prob(tp, max_bias=mb)
                             vol    = rand_volume(series)
                             result = ("yes" if random.random() < tp else "no") if finalized else ""
 
@@ -250,8 +281,18 @@ def generate_markets() -> pd.DataFrame:
                         continue  # skip the shared append below for game winner
 
                     tp = random.uniform(*prob_range)
-                    yb, ya, nb, na, last, market_prob = spread_from_prob(tp)
+                    mb = _market_max_bias(series, threshold, season)
+                    yb, ya, nb, na, last, market_prob = spread_from_prob(tp, max_bias=mb)
                     vol    = rand_volume(series)
+
+                    # Liquidity variation: ~8% of high-threshold longshot props
+                    # get low volume/OI so the critic's liquidity veto fires on them.
+                    if series == "KXNBASGPROP" and threshold in (30, 10) and random.random() < 0.08:
+                        vol = random.randint(200, 800)
+                        oi  = random.randint(30, 450)
+                    else:
+                        oi  = int(vol * random.uniform(0.05, 0.25))
+
                     result = ("yes" if random.random() < tp else "no") if finalized else ""
 
                     markets.append({
@@ -269,7 +310,7 @@ def generate_markets() -> pd.DataFrame:
                         "last_price":    last,
                         "volume":        vol,
                         "volume_24h":    int(vol * random.uniform(0.01, 0.1)) if not finalized else 0,
-                        "open_interest": int(vol * random.uniform(0.05, 0.25)),
+                        "open_interest": oi,
                         "result":        result,
                         "created_time":  open_t - timedelta(days=random.randint(1, 3)),
                         "open_time":     open_t,
@@ -307,11 +348,11 @@ def generate_trades(markets_df: pd.DataFrame, target: int = 400_000) -> pd.DataF
         for _ in range(n):
             t = random.random()
             # In real prediction markets, trades occur near the current market
-            # price (bid-ask spread is a few cents). Use std=0.04 so each
+            # price (bid-ask spread is a few cents). Use std=0.025 so each
             # market's trades stay in its own price neighbourhood — this
             # prevents high-volume markets from contaminating adjacent price
             # buckets used by the quant calibration queries.
-            price_center = base_prob + random.gauss(0, 0.04)  # ±4% realistic spread
+            price_center = base_prob + random.gauss(0, 0.025)  # ±2.5% realistic spread
             price_center = max(0.01, min(0.99, price_center))
             yp = max(1, min(99, round(price_center * 100)))
 
@@ -422,6 +463,62 @@ def verify():
         LIMIT 5
     """).df()
     print(f"  OK Sample markets:\n{result.to_string()}")
+
+    # ── Diagnostic A: calibration gap by market category and season ──────────
+    # Expected: GAME shows consistent ~6-9% gap across seasons;
+    #           PROP shows declining gap (2023 high → 2025 low).
+    cal_gap = con.execute("""
+        WITH resolved AS (
+            SELECT ticker, result, close_time
+            FROM 'data/kalshi/markets/*.parquet'
+            WHERE status = 'finalized' AND result IN ('yes', 'no')
+        ),
+        longshot_trades AS (
+            SELECT
+                t.yes_price,
+                m.result,
+                m.close_time,
+                CASE
+                    WHEN t.ticker LIKE 'KXNBAGAME%'   THEN 'GAME'
+                    WHEN t.ticker LIKE 'KXNBASGPROP%' THEN 'PROP'
+                    ELSE 'OTHER'
+                END AS mkt_type,
+                YEAR(m.close_time) AS season
+            FROM 'data/kalshi/trades/*.parquet' t
+            INNER JOIN resolved m ON t.ticker = m.ticker
+            WHERE t.yes_price BETWEEN 5 AND 20
+              AND t.taker_side = 'no'
+        )
+        SELECT
+            mkt_type,
+            season,
+            ROUND(
+                AVG(CASE WHEN result = 'no' THEN 1.0 ELSE 0.0 END)
+                - AVG((100 - yes_price) / 100.0),
+            4) AS cal_gap,
+            COUNT(*) AS n
+        FROM longshot_trades
+        GROUP BY mkt_type, season
+        ORDER BY mkt_type, season
+    """).df()
+    print(f"\n  Calibration gap by type & season (longshot ≤20c, BET_NO side):")
+    print(cal_gap.to_string(index=False))
+
+    # ── Diagnostic B: liquidity distribution for longshot player props ────────
+    # Expected: ~8% of PTS30/AST10 markets have open_interest < 500.
+    liq = con.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE open_interest < 500)  AS illiquid,
+            COUNT(*) FILTER (WHERE open_interest >= 500) AS liquid,
+            COUNT(*)                                      AS total,
+            ROUND(
+                COUNT(*) FILTER (WHERE open_interest < 500) * 100.0 / COUNT(*),
+            1) AS pct_illiquid
+        FROM 'data/kalshi/markets/*.parquet'
+        WHERE ticker LIKE '%PTS30%' OR ticker LIKE '%AST10%'
+    """).df()
+    print(f"\n  Liquidity check for PTS30/AST10 longshot props:")
+    print(liq.to_string(index=False))
 
     print("\n  All checks passed OK")
 

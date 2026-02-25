@@ -6,11 +6,13 @@ READY/PASS decision, then sends READY decisions to the critic for
 final approval before returning an execution-ready decision object.
 
 Pipeline:
-  trade_packet → quant (calibration gap) → orchestrator (READY/PASS) → critic (APPROVE/VETO)
+  trade_packet
+    → quant  (calibration gap + ESPN context + nba_api stats)
+    → [Research Agent placeholder — not yet implemented]
+    → orchestrator (synthesize → Trade Proposal READY/PASS)
+    → critic (adversarial APPROVE/VETO — only on READY)
 
-Agent selection is controlled by LLM_MODE (src/config.py):
-  LLM_MODE=rule       — deterministic rule-based agents (default, no API keys needed)
-  LLM_MODE=anthropic  — ChatAnthropic-powered agents (requires ANTHROPIC_API_KEY)
+Always uses Claude (claude-sonnet-4-6). Requires ANTHROPIC_API_KEY.
 """
 
 import json
@@ -46,75 +48,72 @@ def _confidence(edge: float, sample_size: int) -> str:
     return "LOW"
 
 
-# System prompt used only in LLM mode
 _SYSTEM_PROMPT = """You are a lead trading analyst for a Kalshi prediction market trading bot.
-You receive a trade signal and a quantitative calibration gap analysis.
-Make the preliminary READY or PASS decision.
 
-IMPORTANT CONTEXT: Real prediction market edges are small. A 2% calibration gap is
+You receive:
+  1. A trade signal (ticker, price, action)
+  2. A quantitative report with pre-computed calibration gap, verdict, and live context
+     (ESPN game status, team recent records from nba_api)
+  3. A research report — contextual news, injury updates, line movement
+     (may be marked as "not yet available" if the Research Agent is not yet implemented)
+
+Your job is to synthesize all available data into a Trade Proposal: READY or PASS.
+
+IMPORTANT: Real prediction market edges are small. A 2% calibration gap is
 considered strong. A 0.8% gap is weak but real. Do not expect large edges.
-
-Respond ONLY with a JSON object — no extra text:
-{{
-    "status":  "READY" or "PASS",
-    "reason":  "<one sentence justification>"
-}}
 
 Decision rules:
 - READY if: verdict is EDGE_CONFIRMED or EDGE_WEAK, AND confidence is HIGH or MEDIUM
 - PASS if: verdict is NO_EDGE or INSUFFICIENT_DATA, or confidence is LOW
 - Always PASS if sample_size < {min_sample}
 - Always PASS if calibration_gap is null or <= 0
+- Live context (injuries, game status) can downgrade READY to PASS if there is a
+  clear disqualifying signal (e.g. key player ruled out, game postponed)
+
+Respond ONLY with a JSON object — no extra text:
+{{
+    "status":  "READY" or "PASS",
+    "reason":  "<one sentence justification — cite the key factor>"
+}}
 """.format(min_sample=MIN_SAMPLE_SIZE)
 
 
 class LeadAnalyst:
     def __init__(self):
-        from src.config import LLM_MODE
+        from langchain_anthropic import ChatAnthropic
+        from src.agents.quant import QuantAgent
+        from src.agents.critic import CriticAgent
 
-        self.role     = "Lead Trading Orchestrator"
-        self.llm_mode = LLM_MODE
-
-        if LLM_MODE == "rule":
-            # Zero external calls — import only local modules
-            from src.agents.rule_agents import RuleQuantAgent, RuleCriticAgent
-            self.quant  = RuleQuantAgent()
-            self.critic = RuleCriticAgent()
-            self.llm    = None
-        else:
-            # anthropic mode — lazy-import so missing package only fails here
-            from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
-            from src.agents.quant import QuantAgent
-            from src.agents.critic import CriticAgent
-            self.quant  = QuantAgent()
-            self.critic = CriticAgent()
-            self.llm    = ChatAnthropic(
-                model="claude-sonnet-4-6",
-                temperature=0,
-            )
+        self.role   = "Lead Trading Orchestrator"
+        self.quant  = QuantAgent()
+        self.critic = CriticAgent()
+        self.llm    = ChatAnthropic(
+            model="claude-sonnet-4-6",
+            temperature=0,
+        )
 
     # ── Internal: orchestrator decision step ────────────────────────────────
     def _orchestrate(
         self,
-        quant_report:    dict,
-        confidence:      str,
-        sample_size:     int,
+        quant_report:     dict,
+        confidence:       str,
+        sample_size:      int,
         calibration_gap,
-        trade_packet:    dict,
+        trade_packet:     dict,
+        research_report:  dict | None = None,
     ) -> dict:
         """Returns {"status": "READY"/"PASS", "reason": "..."}"""
-
-        if self.llm is None:
-            # Rule mode — pure Python logic, no network
-            from src.agents.rule_agents import rule_orchestrate
-            return rule_orchestrate(quant_report, confidence, sample_size, calibration_gap)
-
-        # ── LLM (anthropic) mode ─────────────────────────────────────────
         from langchain_core.messages import HumanMessage, SystemMessage
 
         ticker = trade_packet.get("ticker")
         price  = trade_packet.get("market_price")
         action = trade_packet.get("action")
+
+        research_section = (
+            f"\nResearch Report:\n{json.dumps(research_report, indent=2)}"
+            if research_report
+            else "\nResearch Report: [Not available — ResearchAgent not yet implemented]"
+        )
 
         human_msg = f"""Trade Signal:
 Ticker:     {ticker}
@@ -122,8 +121,9 @@ Price:      {price}c
 Action:     {action}
 Confidence: {confidence}
 
-Quant Report:
+Quant Report (all numbers pre-computed in Python):
 {json.dumps(quant_report, indent=2)}
+{research_section}
 """
         try:
             response = self.llm.invoke([
@@ -139,21 +139,26 @@ Quant Report:
     def analyze_signal(self, trade_packet: dict) -> dict:
         """
         Full pipeline:
-          1. Quant agent — calibration gap analysis by price bucket
-          2. Orchestrator — preliminary READY/PASS (rule or LLM)
-          3. Critic agent — adversarial APPROVE/VETO (only on READY)
+          1. Quant agent — calibration gap (Python math) + ESPN + nba_api context
+          2. Research Agent placeholder — will provide news/injury/line data
+          3. Orchestrator — synthesize into Trade Proposal (READY/PASS)
+          4. Critic agent — adversarial portfolio-aware APPROVE/VETO (only on READY)
 
         Final status values:
-          APPROVED  — passed quant + orchestrator + critic → send to trade_manager
+          APPROVED  — passed quant + orchestrator + critic
           PASS      — rejected by orchestrator (no edge / bad data)
           VETOED    — passed orchestrator but critic killed it
+
+        Execution is the caller's responsibility — this method only returns
+        the decision dict.  The websocket client logs APPROVED trades to
+        SQLite; src.settle checks back for P&L once games resolve.
         """
         ticker = trade_packet.get("ticker")
         price  = trade_packet.get("market_price")
         action = trade_packet.get("action")
         side   = "no" if action == "BET_NO" else "yes"
 
-        # ── Step 1: Quant calibration gap analysis ──────────────────────
+        # ── Step 1: Quant calibration gap analysis ────────────────────────────
         quant_report = self.quant.analyze(trade_packet)
 
         edge        = quant_report.get("calibration_gap")
@@ -161,13 +166,20 @@ Quant Report:
         confidence  = _confidence(edge or 0, sample_size)
         kelly       = _kelly(edge or 0)
 
-        # ── Step 2: Orchestrator preliminary decision ───────────────────
+        # ── Step 1.5: Research Agent placeholder ─────────────────────────────
+        # TODO: instantiate ResearchAgent (src/agents/researcher.py) and call it here.
+        # It will pull news, injury reports, and betting line movements for the ticker.
+        # Pass the result as research_report= into _orchestrate() below.
+        research_report = None   # placeholder — ResearchAgent not yet implemented
+
+        # ── Step 2: Orchestrator preliminary decision ─────────────────────────
         ruling = self._orchestrate(
-            quant_report, confidence, sample_size, edge, trade_packet
+            quant_report, confidence, sample_size, edge, trade_packet,
+            research_report=research_report,
         )
         preliminary_status = ruling.get("status", "PASS")
 
-        # ── Base decision object ────────────────────────────────────────
+        # ── Base decision object ──────────────────────────────────────────────
         decision = {
             "action":         action if preliminary_status == "READY" else "PASS",
             "ticker":         ticker,
@@ -182,19 +194,8 @@ Quant Report:
             "reason":         ruling.get("reason", ""),
         }
 
-        # ── Step 3: Critic review (only on READY) ──────────────────────
+        # ── Step 3: Critic review (only on READY) ─────────────────────────────
         if preliminary_status == "READY":
             decision = self.critic.review(trade_packet, decision)
-
-        # ── Step 4: Execution (only on APPROVED) ────────────────────────
-        if decision.get("status") == "APPROVED" and decision.get("action") in ("BET_YES", "BET_NO"):
-            from src.config import EXECUTION_MODE
-            if EXECUTION_MODE == "paper":
-                from src.execution.trade_manager import PaperTradeManager
-                report = PaperTradeManager().execute(decision, trade_packet)
-                decision["execution"] = report
-            elif EXECUTION_MODE == "live":
-                from src.execution.trade_manager import LiveTradeManager
-                LiveTradeManager().execute(decision, trade_packet)
 
         return decision

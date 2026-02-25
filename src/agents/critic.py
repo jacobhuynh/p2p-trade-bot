@@ -11,6 +11,12 @@ marked as READY. It specifically hunts for:
   - Suspicious data patterns (win rate too perfect = data contamination)
   - Kelly fraction sanity checks
   - Recency concerns
+  - Liquidity traps
+  - Portfolio concentration (same game/team correlated exposure)
+
+Before calling the LLM, the critic queries SQLite for all PENDING_RESOLUTION
+trades to build an open portfolio snapshot.  Correlation is detected by
+comparing the game identifier embedded in the ticker.
 
 Only READY decisions get sent to the critic.
 Output: APPROVE or VETO with a specific reason.
@@ -19,7 +25,7 @@ Output: APPROVE or VETO with a specific reason.
 import json
 import re
 
-SYSTEM_PROMPT = """You are an adversarial trading critic for a Kalshi prediction market bot.
+_SYSTEM_PROMPT = """You are an adversarial trading critic for a Kalshi prediction market bot.
 Your ONLY job is to find legitimate reasons to VETO a trade.
 
 You are the last line of defense before real money is placed.
@@ -29,6 +35,7 @@ You will receive:
 - The original trade signal (ticker, price, action)
 - The orchestrator's decision (READY with confidence/edge/kelly)
 - The quant's full report (historical data, calibration gap, sample size)
+- The current open portfolio (all PENDING_RESOLUTION trades)
 
 You are specifically hunting for these failure modes:
 
@@ -60,6 +67,13 @@ You are specifically hunting for these failure modes:
    - volume=0 or open_interest < 500 = can't get filled at this price
    - Even with edge, illiquid markets are a VETO
 
+7. PORTFOLIO CONCENTRATION
+   - same_game_exposure: money already riding on this exact game
+   - If same-game exposure already > $15, this is meaningful correlated risk
+   - If total open portfolio exposure > $50, flag overall concentration
+   - All positions on the same game resolve together — concentrated loss scenario
+   - Do NOT automatically veto on concentration alone, but always note it in concerns
+
 Respond ONLY with a JSON object — no extra text:
 {
     "decision":      "APPROVE" or "VETO",
@@ -77,10 +91,21 @@ You should APPROVE more often than you VETO — only hard block on clear issues.
 """
 
 
+def _parse_game_key(ticker: str) -> str:
+    """
+    Extract the game identifier from a KXNBAGAME ticker for correlation detection.
+
+    KXNBAGAME-25JAN15LACBOS-NO  →  "25JAN15LACBOS"
+
+    For non-KXNBAGAME tickers, returns the ticker itself so at least exact
+    duplicates are caught.
+    """
+    parts = ticker.split("-")
+    return parts[1] if len(parts) >= 3 else ticker
+
+
 class CriticAgent:
     def __init__(self):
-        # Lazy import — only load langchain_anthropic when this class is instantiated.
-        # This keeps rule mode fully independent of the package.
         from langchain_anthropic import ChatAnthropic
         self.llm = ChatAnthropic(
             model="claude-sonnet-4-6",
@@ -92,15 +117,37 @@ class CriticAgent:
         Reviews an orchestrator READY decision and either APPROVEs or VETOs it.
         Only call this when decision['status'] == 'READY'.
 
+        Queries the open portfolio from SQLite before calling the LLM so the
+        critic can check for correlated exposure on the same game.
+
         Returns the final decision dict with critic fields added.
         """
-        ticker       = trade_packet.get("ticker")
+        ticker       = trade_packet.get("ticker", "")
         price        = trade_packet.get("market_price")
         action       = orchestrator_decision.get("action")
         quant        = orchestrator_decision.get("quant_summary", {})
         confidence   = orchestrator_decision.get("confidence")
         edge         = orchestrator_decision.get("edge")
         kelly        = orchestrator_decision.get("kelly_fraction")
+
+        # ── Query open portfolio ───────────────────────────────────────────────
+        try:
+            from src.execution.trade_logger import TradeLogger
+            open_trades = TradeLogger().open_trades()
+        except Exception:
+            open_trades = []
+
+        game_key          = _parse_game_key(ticker)
+        same_game_trades  = [t for t in open_trades if _parse_game_key(t["ticker"]) == game_key]
+        total_exposure    = round(sum(t["cost_usd"] for t in open_trades), 2)
+        same_game_exposure = round(sum(t["cost_usd"] for t in same_game_trades), 2)
+
+        portfolio_section = (
+            f"Open Portfolio ({len(open_trades)} PENDING_RESOLUTION trade(s), "
+            f"${total_exposure:.2f} total exposure):\n"
+            f"  Same-game trades : {len(same_game_trades)} trade(s), "
+            f"${same_game_exposure:.2f} exposure on this game"
+        )
 
         # Detect market type from ticker prefix
         if "KXNBAWINS" in ticker:
@@ -119,6 +166,8 @@ Confidence:     {confidence}
 Edge:           {edge}
 Kelly Fraction: {kelly}
 
+{portfolio_section}
+
 Orchestrator Decision:
 {json.dumps(orchestrator_decision, indent=2)}
 
@@ -131,7 +180,7 @@ Find reasons to VETO this trade. Be specific.
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
             response = self.llm.invoke([
-                SystemMessage(content=SYSTEM_PROMPT),
+                SystemMessage(content=_SYSTEM_PROMPT),
                 HumanMessage(content=human_msg),
             ])
             raw    = response.content

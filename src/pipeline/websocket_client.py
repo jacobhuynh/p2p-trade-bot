@@ -8,8 +8,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from src.pipeline import bouncer
+from src.pipeline import router
 from src.agents.orchestrator import LeadAnalyst
+from src.execution.trade_logger import TradeLogger
 
 load_dotenv()
 
@@ -20,6 +21,7 @@ class KalshiWebsocketClient:
         self.uri = "wss://api.elections.kalshi.com/trade-api/ws/v2"
         self.private_key = self._load_private_key()
         self.analyst = LeadAnalyst()
+        self.logger = TradeLogger()
 
     def _load_private_key(self):
         with open(self.private_key_path, "rb") as key_file:
@@ -51,7 +53,7 @@ class KalshiWebsocketClient:
             await websocket.send(json.dumps({
                 "id": 1, "cmd": "subscribe", "params": {"channels": ["trade"]}
             }))
-            print("📡 Listening for NBA Longshots (~20% contracts)...")
+            print("📡 Listening for NBA trades (Game Winners → full pipeline | Totals/Props → placeholder)...")
 
             async for message in websocket:
                 data = json.loads(message)
@@ -60,16 +62,16 @@ class KalshiWebsocketClient:
     async def handle_message(self, data):
         if data.get("type") == "trade":
             payload = data.get("msg", {})
-            trade_packet = bouncer.process_trade(payload)
+            market_type, trade_packet = router.route(payload)
 
-            if trade_packet:
+            if market_type == "GAME_WINNER" and trade_packet:
+                # ── Full longshot pipeline: Quant → Orchestrator → Critic ────
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 decision  = self.analyst.analyze_signal(trade_packet)
                 quant     = decision.get("quant_summary", {})
                 critic    = decision.get("critic", {})
                 status    = decision.get("status")
 
-                # Status emoji
                 status_emoji = {
                     "APPROVED": "✅",
                     "VETOED":   "🚫",
@@ -77,7 +79,7 @@ class KalshiWebsocketClient:
                 }.get(status, "❓")
 
                 print(f"\n{'='*60}")
-                print(f"🚨 SIGNAL | {timestamp}  {status_emoji} {status}")
+                print(f"🚨 GAME WINNER | {timestamp}  {status_emoji} {status}")
                 print(f"{'='*60}")
                 print(f"📌 Ticker:      {trade_packet['ticker']}")
                 print(f"📋 Title:       {trade_packet.get('market_title', 'N/A')}")
@@ -110,8 +112,20 @@ class KalshiWebsocketClient:
                             print(f"   ⚠️  {c}")
                     print(f"   Summary:     {critic.get('summary')}")
 
+                if status == "APPROVED":
+                    trade_id = self.logger.log_trade(decision, trade_packet)
+                    print(f"{'─'*60}")
+                    print(f"💾 Logged as trade #{trade_id} — run `python -m src.settle` to check P&L")
+
                 print(f"{'='*60}")
+
+            elif market_type in ("TOTALS", "PLAYER_PROP"):
+                # Placeholder handlers print their own one-liner inside router.py.
+                # Nothing more to do here until real strategies are implemented.
+                pass
+
             else:
+                # NON_NBA, UNKNOWN, or mid-price GAME_WINNER (filtered by bouncer)
                 print(".", end="", flush=True)
 
 if __name__ == "__main__":
