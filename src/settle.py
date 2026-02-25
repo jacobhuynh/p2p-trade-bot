@@ -3,51 +3,20 @@ src/settle.py
 
 Resolution checker for the live mock trader.
 
-For each PENDING_RESOLUTION trade in data/live_trades.db, queries the ESPN
-hidden scoreboard API to check if the game has finished.  When ESPN reports
-STATUS_FINAL, evaluates the mock trade and computes the hypothetical P&L,
-updating the row to EVALUATED.
+For each PENDING_RESOLUTION trade in data/live_trades.db, queries the Kalshi
+REST API to check whether the market has been finalized.  When Kalshi reports
+status="finalized" the result field ("yes" or "no") is used directly to
+evaluate the mock trade and compute hypothetical P&L.
 
-No Kalshi API calls are made — resolution is driven entirely by ESPN.
+Works for all market types (KXNBAGAME, KXNBAWINS, KXNBASGPROP) — no ticker
+parsing or team-name inference required.
 
 Usage:
     python -m src.settle
 """
 
 from src.execution.trade_logger import TradeLogger
-from src.tools.espn_tool import find_game
-
-
-def _determine_result(trade: dict, game: dict) -> str | None:
-    """
-    Given an EVALUATED trade and an ESPN final game result, return 'yes' or 'no'
-    (the Kalshi market result) based on which team won.
-
-    For KXNBAGAME markets:
-      - The ticker encodes HOME and AWAY teams (e.g. KXNBAGAME-25JAN15LACBOS-NO)
-      - YES resolves 'yes' if the YES side won the game
-      - The trade's 'side' field ('yes' or 'no') tells us which Kalshi side we hold
-      - We need to figure out whether 'yes' = home win or 'yes' = away win
-
-    Kalshi convention: the ticker suffix (-YES / -NO) tells us what YES represents.
-    For simplicity we use the winner_abbr from ESPN and the home/away teams parsed
-    from the ticker to decide: if winner is home_abbr → 'yes' (home won → YES wins
-    for a standard KXNBAGAME market). If winner is away_abbr → 'no'.
-
-    Returns None if the result cannot be determined (draw / OT ambiguity / parse fail).
-    """
-    winner = game.get("winner_abbr", "").upper()
-    if not winner:
-        return None
-
-    home_espn = game.get("home_abbr", "").upper()
-    away_espn = game.get("away_abbr", "").upper()
-
-    if winner == home_espn:
-        return "yes"   # home team won → YES resolves 'yes'
-    if winner == away_espn:
-        return "no"    # away team won → YES resolves 'no'
-    return None
+from src.tools.kalshi_rest import get_market_details
 
 
 def run_settle(db_path: str = "data/live_trades.db") -> None:
@@ -68,23 +37,23 @@ def run_settle(db_path: str = "data/live_trades.db") -> None:
     for trade in pending_trades:
         ticker = trade["ticker"]
 
-        game = find_game(ticker, search_days=3)
+        market = get_market_details(ticker)
 
-        if game is None:
+        if market is None:
             still_pending.append(trade)
-            print(f"  [#{trade['id']:>3}] {ticker:<42}  No ESPN match — kept PENDING")
+            print(f"  [#{trade['id']:>3}] {ticker:<42}  Kalshi API unavailable — kept PENDING")
             continue
 
-        if game["status"] != "STATUS_FINAL":
+        status = market.get("status", "")
+        if status != "finalized":
             still_pending.append(trade)
-            status_label = game.get("status", "UNKNOWN")
-            print(f"  [#{trade['id']:>3}] {ticker:<42}  Game {status_label} — kept PENDING")
+            print(f"  [#{trade['id']:>3}] {ticker:<42}  status={status} — kept PENDING")
             continue
 
-        result = _determine_result(trade, game)
-        if result is None:
+        result = market.get("result", "")
+        if result not in ("yes", "no"):
             still_pending.append(trade)
-            print(f"  [#{trade['id']:>3}] {ticker:<42}  Cannot determine result — kept PENDING")
+            print(f"  [#{trade['id']:>3}] {ticker:<42}  result={result!r} unrecognised — kept PENDING")
             continue
 
         evaluated = logger.evaluate_trade(trade["id"], result)

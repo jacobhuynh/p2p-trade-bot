@@ -30,7 +30,7 @@ flowchart TD
     ORCH["LeadAnalyst<br/>Synthesize → READY / PASS<br/>Kelly fraction ≤ 15%"]
     CRITIC["CriticAgent<br/>Adversarial review<br/>Queries open portfolio<br/>APPROVE / VETO"]
     LOGGER["TradeLogger<br/>SQLite · live_trades.db<br/>PENDING_RESOLUTION"]
-    SETTLE["src/settle.py<br/>ESPN scoreboard poll<br/>EVALUATED + P&L"]
+    SETTLE["src/settle.py<br/>Kalshi REST poll<br/>EVALUATED + P&L"]
     PLACEHOLDER["◻ Placeholder<br/>print one-liner · drop"]
     DROPPED(("· dropped"))
     PASSD(("· PASS"))
@@ -220,7 +220,7 @@ Wrapper around the ESPN hidden NBA scoreboard API.
 - `get_nba_scoreboard(date=None) → list[dict]` — fetches all games for a date (YYYYMMDD) or today; returns `{home_abbr, away_abbr, status, home_score, away_score, winner_abbr, ...}`
 - `find_game(ticker, search_days=2) → dict | None` — parses teams from KXNBAGAME ticker and finds the matching ESPN game in today's + recent scoreboards
 
-Used by `QuantAgent` for live context and by `src/settle.py` for resolution.
+Used by `QuantAgent` for live game context only. Settlement is handled by the Kalshi REST API, not ESPN.
 
 > **Note:** Team abbreviation mapping handles mismatches between Kalshi and ESPN conventions (e.g. `GSW` → `GS`, `NOP` → `NO`, `UTA` → `UTAH`). The ticker parser uses `{2,3}` character matching to correctly split adjacent 3-char team codes (e.g. `LACBOS` → `LAC` + `BOS`).
 
@@ -318,7 +318,7 @@ evaluate_trade()  →  status = EVALUATED
 
 ### Resolution — `src/settle.py`
 
-Polls ESPN for final game results and evaluates any `PENDING_RESOLUTION` trades.
+Polls the Kalshi REST API for final market results and evaluates any `PENDING_RESOLUTION` trades. Works for all market types — no ticker parsing or team-name inference required.
 
 ```bash
 python -m src.settle
@@ -326,9 +326,9 @@ python -m src.settle
 
 **Process for each pending trade:**
 
-1. Calls `espn_tool.find_game(ticker, search_days=3)` — searches today + 2 prior days
-2. Skips if no ESPN match or game not `STATUS_FINAL`
-3. Determines winner from home/away abbreviations
+1. Calls `kalshi_rest.get_market_details(ticker)` — fetches live market state
+2. Skips if API unavailable or `status != "finalized"`
+3. Reads `result` field directly (`"yes"` or `"no"`)
 4. Calls `logger.evaluate_trade(id, result)` → sets `EVALUATED` with P&L
 
 ---
@@ -508,17 +508,18 @@ python tests/test_pipeline.py --live
 | Ticker parsing (8 tests) | `_parse_teams_from_ticker()` for valid tickers, KXNBAWINS, missing segments                                                     |
 | Live nba_api (4 tests)   | Non-NBA and unknown team codes return None; real teams return correct `home`/`away` dict schema (or None on API unavailability) |
 
-### `tests/test_settle.py` — Settlement module (real ESPN API + temp SQLite)
+### `tests/test_settle.py` — Settlement module (mocked Kalshi REST, no keys needed)
 
-| Test                                                | What it verifies                                         |
-| --------------------------------------------------- | -------------------------------------------------------- |
-| `test_determine_result_home_wins`                   | Home team winner → `"yes"`                               |
-| `test_determine_result_away_wins`                   | Away team winner → `"no"`                                |
-| `test_determine_result_no_winner` / `_unknown_team` | Empty or mismatched winner → `None`                      |
-| `test_determine_result_case_insensitive`            | Lowercase `winner_abbr` still matches                    |
-| `test_run_settle_no_pending_trades`                 | Empty DB → prints message, no crash                      |
-| `test_run_settle_fake_ticker_stays_pending`         | Fake ticker hits real ESPN, gets no match, stays PENDING |
-| `test_run_settle_multiple_pending_all_fake`         | Multiple fake tickers all stay PENDING                   |
+| Test | What it verifies |
+|---|---|
+| `test_run_settle_no_pending_trades` | Empty DB → prints message, API never called |
+| `test_run_settle_api_unavailable` | `get_market_details` returns None → trade stays PENDING |
+| `test_run_settle_market_still_open` | `status="open"` → trade stays PENDING |
+| `test_run_settle_market_closed_not_finalized` | `status="closed"` → trade stays PENDING |
+| `test_run_settle_market_finalized_win` | `status="finalized", result="no"` for BET_NO → EVALUATED, pnl > 0 |
+| `test_run_settle_market_finalized_loss` | `status="finalized", result="yes"` for BET_NO → EVALUATED, pnl < 0 |
+| `test_run_settle_multiple_mixed` | One finalized WIN + one open → 1 evaluated, 1 still PENDING |
+| `test_run_settle_unrecognised_result` | `result="void"` (unexpected string) → stays PENDING |
 
 ### `tests/test_websocket.py` — WebSocket client (requires `.env`)
 
