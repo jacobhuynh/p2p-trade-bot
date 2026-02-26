@@ -1,17 +1,19 @@
 """
 src/tools/espn_tool.py
 
-Lightweight wrapper around the ESPN hidden NBA scoreboard API.
+Lightweight wrapper around the ESPN hidden NBA scoreboard and news APIs.
 
-Used by two consumers:
-  - src/agents/quant.py  : live game context (injuries, game status) for the
-                           qualitative LLM summary
-  - src/settle.py        : resolution check — is the game STATUS_FINAL?
+Used by:
+  - src/agents/quant.py       : live game context for the qualitative LLM summary
+  - src/agents/sentiment_agent.py : matchup context (game + team news) for sentiment
+  - src/settle.py             : resolution check — is the game STATUS_FINAL?
 
 Public API
 ----------
 get_nba_scoreboard(date=None)  -> list[dict]
 find_game(ticker, search_days=2) -> dict | None
+get_nba_news(limit=20) -> list[dict]
+get_espn_matchup_context(ticker) -> dict | None
 """
 
 import re
@@ -20,6 +22,9 @@ from datetime import datetime, timedelta, timezone
 
 ESPN_SCOREBOARD_URL = (
     "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+)
+ESPN_NBA_NEWS_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/news"
 )
 
 # Kalshi 3-letter abbreviation → ESPN abbreviation (only where they differ)
@@ -33,6 +38,42 @@ _KALSHI_TO_ESPN: dict[str, str] = {
     "POR": "POR",  # Portland Trail Blazers (same)
     "MEM": "MEM",  # Memphis Grizzlies (same)
     "MIN": "MIN",  # Minnesota Timberwolves (same)
+}
+
+# ESPN API team description (from news categories) → Kalshi abbreviation
+# Used to filter news articles by matchup teams.
+_ESPN_TEAM_DESC_TO_ABBR: dict[str, str] = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "LA Clippers": "LAC",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",
+    "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",
+    "Washington Wizards": "WAS",
 }
 
 
@@ -187,3 +228,78 @@ def find_game(ticker: str, search_days: int = 2) -> dict | None:
                 return game
 
     return None
+
+
+def get_nba_news(limit: int = 20) -> list[dict]:
+    """
+    Fetch recent NBA news from ESPN (headlines + descriptions).
+
+    Returns a list of dicts: { "headline", "description", "team_abbrs" }.
+    team_abbrs is a list of Kalshi 3-letter team abbreviations mentioned in
+    the article (from ESPN categories). Empty list if no team tags.
+    On failure returns [].
+    """
+    try:
+        resp = requests.get(
+            ESPN_NBA_NEWS_URL, params={"limit": limit}, timeout=8
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+
+    articles: list[dict] = []
+    for item in data.get("articles", []):
+        team_abbrs: list[str] = []
+        for cat in item.get("categories", []):
+            if cat.get("type") == "team":
+                desc = cat.get("description", "")
+                abbr = _ESPN_TEAM_DESC_TO_ABBR.get(desc)
+                if abbr and abbr not in team_abbrs:
+                    team_abbrs.append(abbr)
+        articles.append({
+            "headline": item.get("headline", ""),
+            "description": item.get("description", ""),
+            "team_abbrs": team_abbrs,
+        })
+    return articles
+
+
+def get_espn_matchup_context(ticker: str) -> dict | None:
+    """
+    Get game status and team-relevant news for a KXNBAGAME ticker.
+
+    Returns dict with keys:
+      "game"      : from find_game(ticker), or None
+      "team_news" : list of { "headline", "description", "team" } for articles
+                    that mention either team in the matchup.
+    Returns None if ticker is not KXNBAGAME or parse fails; returns
+    { "game": None, "team_news": [] } on API errors so caller can still use
+    whatever is available.
+    """
+    parsed = _parse_ticker(ticker)
+    if parsed is None:
+        return None
+    home_abbr, away_abbr = parsed
+    teams = {home_abbr.upper(), away_abbr.upper()}
+
+    game = None
+    try:
+        game = find_game(ticker)
+    except Exception:
+        pass
+
+    team_news: list[dict] = []
+    try:
+        for article in get_nba_news(limit=15):
+            abbrs = set(a.upper() for a in article.get("team_abbrs", []))
+            if abbrs & teams:
+                team_news.append({
+                    "headline": article.get("headline", ""),
+                    "description": article.get("description", ""),
+                    "team": list(abbrs & teams),
+                })
+    except Exception:
+        pass
+
+    return {"game": game, "team_news": team_news}

@@ -111,6 +111,15 @@ You are specifically hunting for these failure modes:
    - All positions on the same game resolve together — concentrated loss scenario
    - Do NOT automatically veto on concentration alone, but always note it in concerns
 
+9. SENTIMENT / LIVE CONTEXT — ALWAYS ADDRESS
+   - You receive a "Synthesized report" (quant + sentiment) and "Sentiment context" (live ESPN/news).
+   - You MUST always consider this sentiment/live context (or note that it was absent or unavailable).
+   - In your response you MUST populate the sentiment_note field with exactly one sentence stating how
+     sentiment factored into your decision — e.g. aligned with the edge, conflicted but not decisive,
+     absent/unavailable, or not weighted because the quantitative sample was large enough.
+   - This is required for every response regardless of APPROVE/VETO and regardless of how much weight
+     you gave to sentiment. The sentence can be brief (e.g. "Sentiment was unavailable; decision based on quant only.").
+
 PRICE BUCKET MODEL — HOW OUR EDGE WORKS:
 Our quantitative edge is derived from historical aggregate behavior of ALL NBA contracts
 at a given yes_price, not from predicting individual team matchups. The sample_size in
@@ -137,7 +146,8 @@ Respond ONLY with a JSON object — no extra text:
     "veto_reason":   "<specific reason if VETO, null if APPROVE>",
     "concerns":      ["<list of concerns even if approving — can be empty>"],
     "risk_score":    <int 1-10, where 10 = maximum risk>,
-    "summary":       "<one sentence overall assessment>"
+    "summary":       "<one sentence overall assessment>",
+    "sentiment_note": "<one sentence: how sentiment/live context factored in, or that it was absent or not weighted>"
 }
 
 Be specific in veto_reason. "Insufficient data" is not specific enough.
@@ -214,6 +224,8 @@ class CriticAgent:
         else:
             market_type_context = "GAME WINNER — standard longshot bias applies"
 
+        sentiment_context = trade_packet.get("sentiment_context") or "None."
+        synthesized_report = orchestrator_decision.get("synthesized_report") or "None."
         human_msg = f"""Trade to review:
 Ticker:         {ticker}
 Market Type:    {market_type_context}
@@ -225,11 +237,17 @@ Kelly Fraction: {kelly}
 
 {portfolio_section}
 
-Orchestrator Decision:
-{json.dumps(orchestrator_decision, indent=2)}
+Synthesized report (Quant + Sentiment):
+{synthesized_report}
+
+Sentiment context (live ESPN/news):
+{sentiment_context}
 
 Quant Report:
 {json.dumps(quant, indent=2)}
+
+Orchestrator Decision:
+{json.dumps(orchestrator_decision, indent=2)}
 
 Find reasons to VETO this trade. Be specific.
 """
@@ -246,11 +264,12 @@ Find reasons to VETO this trade. Be specific.
 
         except Exception as e:
             critique = {
-                "decision":    "VETO",
-                "veto_reason": f"Critic agent error — defaulting to VETO for safety: {str(e)}",
-                "concerns":    [],
-                "risk_score":  10,
-                "summary":     "Critic failed to run — trade blocked for safety.",
+                "decision":       "VETO",
+                "veto_reason":    f"Critic agent error — defaulting to VETO for safety: {str(e)}",
+                "concerns":       [],
+                "risk_score":     10,
+                "summary":        "Critic failed to run — trade blocked for safety.",
+                "sentiment_note": "Not specified.",
             }
 
         # Merge critic result into the decision object
@@ -261,10 +280,11 @@ Find reasons to VETO this trade. Be specific.
             "status":       final_status,
             "action":       orchestrator_decision["action"] if final_status == "APPROVED" else "PASS",
             "critic": {
-                "decision":    critique["decision"],
-                "veto_reason": critique.get("veto_reason"),
-                "concerns":    critique.get("concerns", []),
-                "risk_score":  critique.get("risk_score"),
-                "summary":     critique.get("summary"),
+                "decision":       critique["decision"],
+                "veto_reason":   critique.get("veto_reason"),
+                "concerns":      critique.get("concerns", []),
+                "risk_score":    critique.get("risk_score"),
+                "summary":       critique.get("summary"),
+                "sentiment_note": critique.get("sentiment_note") or "Not specified.",
             }
         }

@@ -48,7 +48,7 @@ class QuantAgent:
     def __init__(self):
         from langchain_anthropic import ChatAnthropic
         self.llm = ChatAnthropic(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5",
             temperature=0,
         )
 

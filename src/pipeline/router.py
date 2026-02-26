@@ -68,6 +68,8 @@ def route(trade_data: dict) -> tuple[str, dict | None]:
         # Longshot bias filter + REST enrichment — full existing pipeline.
         # Returns None if the price is in the middle (no edge signal).
         packet = bouncer.process_trade(trade_data)
+        if packet is not None:
+            packet["contract_type"] = "GAME_WINNER"
         return "GAME_WINNER", packet
 
     if market_type == "TOTALS":

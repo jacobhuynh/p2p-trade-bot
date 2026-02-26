@@ -1,21 +1,24 @@
 """
 src/agents/orchestrator.py
 
-The Lead Analyst — orchestrates the quant agent, then forwards every
-positive-edge signal directly to the Critic for final judgment.
+The Lead Analyst — runs Quant and Sentiment in parallel, aggregates their
+outputs, then forwards positive-edge signals to the Critic for final judgment.
 
 Pipeline:
   trade_packet
-    → quant  (calibration gap + ESPN context + nba_api stats)
-    → [Research Agent placeholder — not yet implemented]
-    → orchestrator (pure data synthesizer: compute Kelly/Confidence, build Trade Proposal)
-    → critic (adversarial APPROVE/VETO — receives all positive-edge signals)
+    → [Quant.analyze(trade_packet) || Sentiment.enrich(copy)] in parallel
+    → orchestrator aggregates: merge sentiment_context into trade_packet
+    → Python gate (PASS if no edge / insufficient data)
+    → READY only: synthesize quant + sentiment into one report
+    → critic (receives synthesized report, quant report, sentiment context)
 
-Always uses Claude (claude-sonnet-4-6). Requires ANTHROPIC_API_KEY.
+Models: Quant, Sentiment, and synthesis use claude-haiku-4-5; only the Critic
+uses claude-sonnet-4-6. Requires ANTHROPIC_API_KEY.
 """
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # ─────────────────────────────────────────────
@@ -51,18 +54,55 @@ class LeadAnalyst:
     def __init__(self):
         from src.agents.quant import QuantAgent
         from src.agents.critic import CriticAgent
+        from src.agents.sentiment_agent import SentimentAgent
 
-        self.role   = "Lead Trading Orchestrator"
-        self.quant  = QuantAgent()
-        self.critic = CriticAgent()
+        self.role    = "Lead Trading Orchestrator"
+        self.sentiment_agent = SentimentAgent()
+        self.quant   = QuantAgent()
+        self.critic  = CriticAgent()
+
+    def _synthesize(
+        self,
+        quant_report: dict,
+        sentiment_context: str | None,
+        ticker: str,
+    ) -> str | None:
+        """
+        Combine quant report and sentiment into one short narrative for the Critic.
+        Uses claude-haiku-4-5. Returns None on failure (pipeline continues with fallback).
+        """
+        gap = quant_report.get("calibration_gap")
+        verdict = quant_report.get("verdict")
+        sample_size = quant_report.get("sample_size", 0)
+        quant_summary = quant_report.get("summary") or "(no quant summary)"
+        sentiment = (sentiment_context or "").strip() or "No live sentiment available."
+
+        prompt = f"""Ticker: {ticker}
+
+Quant: calibration_gap={gap}, verdict={verdict}, sample_size={sample_size}. Summary: {quant_summary}
+
+Sentiment (live ESPN/news): {sentiment}
+
+Write one short paragraph (2-4 sentences) that combines the quantitative edge and verdict with the live sentiment. One coherent narrative for a trading Critic to review. Output only the paragraph, no labels."""
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage
+            llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0)
+            response = llm.invoke([HumanMessage(content=prompt)])
+            out = (response.content or "").strip()
+            return out if out else None
+        except Exception:
+            return f"Quant: {quant_summary} Sentiment: {sentiment}"
 
     # ── Public: full pipeline ────────────────────────────────────────────────
     def analyze_signal(self, trade_packet: dict) -> dict:
         """
         Full pipeline:
-          1. Quant agent — calibration gap (Python math) + ESPN + nba_api context
-          2. Python-only gate — PASS only if no positive edge or insufficient data
-          3. Critic agent — adversarial portfolio-aware APPROVE/VETO on all valid signals
+          0. Quant and Sentiment run in parallel (Quant on trade_packet, Sentiment on a copy).
+          1. Orchestrator aggregates: merge sentiment_context from copy into trade_packet.
+          2. Python-only gate — PASS only if no positive edge or insufficient data.
+          3. READY only: synthesize quant + sentiment into one report.
+          4. Critic agent — adversarial APPROVE/VETO; receives synthesized report, quant report, sentiment.
 
         Final status values:
           APPROVED  — passed quant gate + critic approved
@@ -73,13 +113,20 @@ class LeadAnalyst:
         the decision dict.  The websocket client logs APPROVED trades to
         SQLite; src.settle checks back for P&L once games resolve.
         """
+        # ── Step 0: Run Quant and Sentiment in parallel; then aggregate ───────
+        packet_copy = dict(trade_packet)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_quant = executor.submit(self.quant.analyze, trade_packet)
+            future_sentiment = executor.submit(self.sentiment_agent.enrich, packet_copy)
+            quant_report = future_quant.result()
+            future_sentiment.result()
+        trade_packet["sentiment_context"] = packet_copy.get("sentiment_context")
+        sentiment_context = trade_packet.get("sentiment_context")
+
         ticker = trade_packet.get("ticker")
         price  = trade_packet.get("market_price")
         action = trade_packet.get("action")
         side   = "no" if action == "BET_NO" else "yes"
-
-        # ── Step 1: Quant calibration gap analysis ────────────────────────────
-        quant_report = self.quant.analyze(trade_packet)
 
         edge        = quant_report.get("calibration_gap")
         sample_size = quant_report.get("sample_size", 0)
@@ -100,31 +147,42 @@ class LeadAnalyst:
 
         if gate_pass:
             return {
-                "action":         "PASS",
-                "ticker":         ticker,
-                "side":           None,
-                "confidence":     confidence,
-                "edge":           edge,
-                "price":          price,
-                "kelly_fraction": 0.0,
-                "quant_summary":  quant_report,
-                "timestamp":      datetime.now(timezone.utc).isoformat(),
-                "status":         "PASS",
-                "reason":         reason,
+                "action":            "PASS",
+                "ticker":           ticker,
+                "side":             None,
+                "confidence":       confidence,
+                "edge":             edge,
+                "price":            price,
+                "kelly_fraction":    0.0,
+                "quant_summary":     quant_report,
+                "sentiment_context": sentiment_context,
+                "timestamp":         datetime.now(timezone.utc).isoformat(),
+                "status":           "PASS",
+                "reason":           reason,
             }
 
-        # ── Step 3: Build Trade Proposal — forward ALL positive-edge signals ──
+        # ── Step 3: Synthesize quant + sentiment into one report for the Critic ─
+        synthesized_report = self._synthesize(quant_report, sentiment_context, ticker)
+
+        # ── Step 4: Build Trade Proposal — forward ALL positive-edge signals ──
+        ready_reason = (
+            "Positive calibration gap; sentiment context available — forwarding to Critic for final review"
+            if sentiment_context else
+            "Positive calibration gap — forwarding to Critic for final review"
+        )
         trade_proposal = {
-            "action":         action,
-            "ticker":         ticker,
-            "side":           side,
-            "confidence":     confidence,
-            "edge":           edge,
-            "price":          price,
-            "kelly_fraction": kelly,
-            "quant_summary":  quant_report,
-            "timestamp":      datetime.now(timezone.utc).isoformat(),
-            "status":         "READY",
-            "reason":         "Positive calibration gap — forwarding to Critic for final review",
+            "action":              action,
+            "ticker":              ticker,
+            "side":                side,
+            "confidence":          confidence,
+            "edge":                edge,
+            "price":               price,
+            "kelly_fraction":      kelly,
+            "synthesized_report":  synthesized_report,
+            "quant_summary":       quant_report,
+            "sentiment_context":   sentiment_context,
+            "timestamp":           datetime.now(timezone.utc).isoformat(),
+            "status":              "READY",
+            "reason":              ready_reason,
         }
         return self.critic.review(trade_packet, trade_proposal)

@@ -92,6 +92,14 @@ class KalshiWebsocketClient:
                 print(f"💰 Price:       {decision['price']}¢")
                 print(f"🎯 Action:      {decision['action']}")
                 print(f"{'─'*60}")
+                sc = trade_packet.get("sentiment_context")
+                print(f"📰 Sentiment (live ESPN context)")
+                if sc:
+                    for line in (sc or "").strip().splitlines():
+                        print(f"   {line}")
+                else:
+                    print(f"   (no data or skipped)")
+                print(f"{'─'*60}")
                 print(f"📊 Quant")
                 print(f"   Gap:           {quant.get('calibration_gap')}")
                 print(f"   Win Rate:      {quant.get('actual_win_rate')}")
@@ -143,6 +151,7 @@ class KalshiWebsocketClient:
                         for c in critic["concerns"]:
                             print(f"   ⚠️  {c}")
                     print(f"   Summary:     {critic.get('summary')}")
+                    print(f"   Sentiment:   {critic.get('sentiment_note', '')}")
 
                 if status == "APPROVED":
                     trade_id = self.logger.log_trade(decision, trade_packet)
