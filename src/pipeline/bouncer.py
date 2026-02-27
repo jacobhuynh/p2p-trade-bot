@@ -60,17 +60,27 @@ def process_trade(trade_data):
 
     # --- ENRICH: Fetch market details from REST API ---
     market = get_market_details(ticker)
-    market_title   = market.get("title", "Unknown")       if market else "Unknown"
-    market_type    = market.get("market_type", "Unknown") if market else "Unknown"
-    rules_primary  = market.get("rules_primary", "")      if market else ""
+    market_title        = market.get("title", "Unknown")       if market else "Unknown"
+    market_type         = market.get("market_type", "Unknown") if market else "Unknown"
+    rules_primary       = market.get("rules_primary", "")      if market else ""
+    live_open_interest  = market.get("open_interest", 0)       if market else 0
+    live_volume_24h     = market.get("volume_24h", 0)          if market else 0
+
+    # --- FILTER 2: Minimum live liquidity (only enforced when REST creds are present) ---
+    # market is None when creds are absent — skip the check so offline testing still works
+    if market is not None and live_open_interest < 100:
+        print(f"\n[SKIP] | {ticker:<40} | OI={live_open_interest} too low (min 100)")
+        return None
 
     return {
-        "ticker":         ticker,
-        "market_price":   yes_price,
-        "category":       "NBA",
-        "action":         action,
-        "reason":         reason,
-        "market_title":   market_title,
-        "market_type":    market_type,
-        "rules_primary":  rules_primary,
+        "ticker":               ticker,
+        "market_price":         yes_price,
+        "category":             "NBA",
+        "action":               action,
+        "reason":               reason,
+        "market_title":         market_title,
+        "market_type":          market_type,
+        "rules_primary":        rules_primary,
+        "live_open_interest":   live_open_interest,
+        "live_volume_24h":      live_volume_24h,
     }

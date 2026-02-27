@@ -16,7 +16,10 @@ get_team_recent_records(ticker, last_n=10) -> dict | None
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
+
+_NBA_API_TIMEOUT = 15  # seconds — nba.com cold-start can be slow; 5s was too low
 
 
 # ── Kalshi abbreviation → NBA Stats API team name fragment ───────────────────
@@ -114,7 +117,7 @@ def _fetch_recent_record(team_id: int, last_n: int) -> Optional[dict]:
         from nba_api.stats.endpoints import LeagueGameFinder
         finder = LeagueGameFinder(
             team_id_nullable=team_id,
-            timeout=5,
+            timeout=_NBA_API_TIMEOUT,
         )
         df = finder.get_data_frames()[0]
         if df is None or df.empty:
@@ -164,8 +167,16 @@ def get_team_recent_records(ticker: str, last_n: int = 10) -> Optional[dict]:
     if home_id is None or away_id is None:
         return None
 
-    home_record = _fetch_recent_record(home_id, last_n)
-    away_record = _fetch_recent_record(away_id, last_n)
+    # Fetch both teams in parallel — cuts total time from sum to max of the two calls.
+    # Each call can take 5–15s on cold start; sequential would double the wait.
+    home_record: Optional[dict] = None
+    away_record: Optional[dict] = None
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        future_home = ex.submit(_fetch_recent_record, home_id, last_n)
+        future_away = ex.submit(_fetch_recent_record, away_id, last_n)
+        home_record = future_home.result()
+        away_record = future_away.result()
 
     if home_record is None and away_record is None:
         return None

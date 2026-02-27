@@ -34,10 +34,36 @@ MIN_VOLUME         = 5000    # minimum market volume for liquidity
 KELLY_FRACTION_CAP = 0.15
 
 
-def _kelly(edge: float) -> float:
-    if edge <= 0:
+def _kelly(actual_win_rate: float | None, price: int | None, action: str | None) -> float:
+    """
+    Standard Kelly criterion for binary prediction market bets.
+
+    f* = p - q / b
+      where p = true win probability (actual_win_rate from historical calibration)
+            q = 1 - p
+            b = net odds = payout_cents / entry_cents
+
+    For BET_NO: entry = 100 - yes_price, payout = yes_price
+    For BET_YES: entry = yes_price, payout = 100 - yes_price
+
+    Returns 0.0 on any bad input. Capped at KELLY_FRACTION_CAP.
+    """
+    if actual_win_rate is None or price is None or action is None:
         return 0.0
-    return round(min(edge, KELLY_FRACTION_CAP), 4)
+    if actual_win_rate <= 0:
+        return 0.0
+
+    entry_cents  = (100 - price) if action == "BET_NO" else price
+    payout_cents = price         if action == "BET_NO" else (100 - price)
+
+    if entry_cents <= 0 or payout_cents <= 0:
+        return 0.0
+
+    b   = payout_cents / entry_cents
+    p   = actual_win_rate
+    q   = 1.0 - p
+    raw = p - q / b
+    return round(max(0.0, min(raw, KELLY_FRACTION_CAP)), 4)
 
 
 def _confidence(edge: float, sample_size: int) -> str:
@@ -128,10 +154,11 @@ Write one short paragraph (2-4 sentences) that combines the quantitative edge an
         action = trade_packet.get("action")
         side   = "no" if action == "BET_NO" else "yes"
 
-        edge        = quant_report.get("calibration_gap")
-        sample_size = quant_report.get("sample_size", 0)
-        confidence  = _confidence(edge or 0, sample_size)
-        kelly       = _kelly(edge or 0)
+        edge             = quant_report.get("calibration_gap")
+        actual_win_rate  = quant_report.get("actual_win_rate")
+        sample_size      = quant_report.get("sample_size", 0)
+        confidence       = _confidence(edge or 0, sample_size)
+        kelly            = _kelly(actual_win_rate, price, action)
 
         # ── Step 2: Python-only gate — no LLM decision ────────────────────────
         # Only PASS if there is literally no positive edge or insufficient data.

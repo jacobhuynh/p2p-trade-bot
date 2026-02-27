@@ -94,8 +94,11 @@ You are specifically hunting for these failure modes:
    - Flag if we can't confirm the edge holds in recent data
 
 6. LIQUIDITY TRAP
-   - volume=0 or open_interest < 500 = can't get filled at this price
-   - Even with edge, illiquid markets are a VETO
+   - live_open_interest < 100 is already pre-blocked in the bouncer (you won't see those)
+   - orderbook_depth_at_price == 0 is pre-blocked by a hard Python rule (you won't see those)
+   - If live_open_interest < 500 (check quant report), flag as a concern
+   - If orderbook_depth_at_price is small relative to our intended contracts, flag as concern
+   - orderbook_depth_at_price = None means we're offline — skip this check
 
 7. MISSING SUPPLEMENTAL DATA
    - If game_context (ESPN) or team_stats (nba_api) is null/unavailable, this is
@@ -105,11 +108,12 @@ You are specifically hunting for these failure modes:
      Large sample sizes make supplemental data unnecessary for confidence.
 
 8. PORTFOLIO CONCENTRATION
-   - same_game_exposure: money already riding on this exact game
-   - If same-game exposure already > $15, this is meaningful correlated risk
-   - If total open portfolio exposure > $50, flag overall concentration
-   - All positions on the same game resolve together — concentrated loss scenario
-   - Do NOT automatically veto on concentration alone, but always note it in concerns
+   - Hard portfolio rules have ALREADY been enforced before you were called:
+     opposing same-game positions, duplicate same-direction bets, and same-game
+     dollar exposure ≥ $15 are all pre-blocked in Python. You will never see a
+     trade that violates those rules.
+   - If total open portfolio exposure > $50, flag overall concentration as a concern
+   - All positions on the same game resolve together — note correlated loss risk
 
 9. SENTIMENT / LIVE CONTEXT — ALWAYS ADDRESS
    - You receive a "Synthesized report" (quant + sentiment) and "Sentiment context" (live ESPN/news).
@@ -171,6 +175,77 @@ def _parse_game_key(ticker: str) -> str:
     return parts[1] if len(parts) >= 3 else ticker
 
 
+def _check_hard_rules(
+    action: str,
+    same_game_trades: list[dict],
+    same_game_exposure: float,
+    quant_report: dict,
+) -> dict | None:
+    """
+    Hard portfolio-safety rules enforced in Python before the LLM is called.
+    Returns a fully-formed VETOED dict if any rule is violated, else None.
+
+    Rules (in priority order):
+      A. No opposing same-game positions (locks in guaranteed losses)
+      B. No duplicate same-direction bets on the same game (over-concentration)
+      C. Hard same-game dollar cap at $15
+      D. Confirmed zero order book depth at our target price (online-only)
+    """
+    opposing_action = "BET_NO" if action == "BET_YES" else "BET_YES"
+
+    # Rule A: opposing same-game position
+    opposing = [t for t in same_game_trades if t.get("action") == opposing_action]
+    if opposing:
+        reason = (
+            f"Opposing same-game position already open: holding {opposing_action} on "
+            f"this game. Adding {action} would lock in guaranteed losses on one leg."
+        )
+        return _hard_veto(reason)
+
+    # Rule B: duplicate same-direction same-game bet
+    same_dir = [t for t in same_game_trades if t.get("action") == action]
+    if same_dir:
+        reason = (
+            f"Duplicate same-game same-direction bet: already have "
+            f"{len(same_dir)} open {action} trade(s) on this game. "
+            f"Max 1 position per game per direction."
+        )
+        return _hard_veto(reason)
+
+    # Rule C: same-game dollar cap
+    if same_game_exposure >= 15.0:
+        reason = (
+            f"Same-game exposure ${same_game_exposure:.2f} already at or above "
+            f"the $15 hard limit. No additional same-game exposure allowed."
+        )
+        return _hard_veto(reason)
+
+    # Rule D: confirmed zero order book depth (None = offline/unknown → skip)
+    depth = quant_report.get("orderbook_depth_at_price")
+    if depth is not None and depth == 0:
+        return _hard_veto(
+            "Live order book confirms 0 contracts available at this price — trade cannot be filled"
+        )
+
+    return None
+
+
+def _hard_veto(reason: str) -> dict:
+    """Construct a VETOED decision dict for a hard-rule violation (no LLM call)."""
+    return {
+        "status":       "VETOED",
+        "action":       "PASS",
+        "critic": {
+            "decision":       "VETO",
+            "veto_reason":    reason,
+            "concerns":       ["[Hard rule — no LLM call made]"],
+            "risk_score":     10,
+            "summary":        reason,
+            "sentiment_note": "Not evaluated — trade blocked by hard portfolio rule before LLM.",
+        },
+    }
+
+
 class CriticAgent:
     def __init__(self):
         from langchain_anthropic import ChatAnthropic
@@ -208,6 +283,11 @@ class CriticAgent:
         same_game_trades  = [t for t in open_trades if _parse_game_key(t["ticker"]) == game_key]
         total_exposure    = round(sum(t["cost_usd"] for t in open_trades), 2)
         same_game_exposure = round(sum(t["cost_usd"] for t in same_game_trades), 2)
+
+        # ── Hard rules — block before wasting an LLM call ─────────────────────
+        hard_veto = _check_hard_rules(action, same_game_trades, same_game_exposure, quant)
+        if hard_veto is not None:
+            return {**orchestrator_decision, **hard_veto}
 
         portfolio_section = (
             f"Open Portfolio ({len(open_trades)} PENDING_RESOLUTION trade(s), "

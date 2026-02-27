@@ -41,6 +41,38 @@ def _get_auth_headers(method: str, path: str) -> dict:
     }
 
 
+def get_orderbook(ticker: str) -> dict | None:
+    """
+    Fetch the live order book for a ticker.
+
+    Returns a dict with "yes" and "no" keys, each a list of [price, size] pairs
+    representing available contracts at each price level.
+    Example: {"yes": [[14, 50], [13, 120]], "no": [[86, 50], [87, 120]]}
+
+    Returns None (without raising) when:
+      - Credentials are not set
+      - Any network / HTTP error occurs
+    When None, callers should treat depth as unknown and skip liquidity enforcement.
+    """
+    api_key_id       = os.getenv("KALSHI_API_KEY_ID")
+    private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+
+    if not api_key_id or not private_key_path:
+        return None
+
+    try:
+        path     = f"/markets/{ticker}/orderbook"
+        headers  = _get_auth_headers("GET", path)
+        response = requests.get(f"{BASE_URL}{path}", headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        # Kalshi returns {"orderbook": {"yes": [...], "no": [...]}}
+        return data.get("orderbook", data)
+    except Exception as e:
+        print(f"[kalshi_rest] Orderbook error for {ticker}: {e}")
+        return None
+
+
 def get_market_details(ticker: str) -> dict | None:
     """
     Fetch full market details for a given ticker.

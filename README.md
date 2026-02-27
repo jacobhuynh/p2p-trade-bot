@@ -22,29 +22,28 @@ All math is computed in Python from a local DuckDB database of historical Kalshi
 
 ```mermaid
 flowchart TD
-    WS["🌐 Kalshi WebSocket Stream<br/>RSA-PSS authenticated"]
+    WS["🌐 Kalshi WebSocket Stream<br/>RSA-PSS authenticated<br/>auto-reconnect + backoff"]
     ROUTER["Router<br/>classify_market(ticker)"]
     BOUNCER["Bouncer — Longshot Filter<br/>YES ≤20¢ → BET_NO<br/>YES ≥80¢ → BET_YES<br/>+ Kalshi REST enrichment"]
     QUANT["QuantAgent<br/>Calibration gap analysis<br/>+ ESPN live context<br/>+ nba_api team records"]
-    RESEARCH["[Research Agent]<br/>TODO: news · injuries<br/>line movement"]
-    ORCH["LeadAnalyst<br/>Synthesize → READY / PASS<br/>Kelly fraction ≤ 15%"]
-    CRITIC["CriticAgent<br/>Adversarial review<br/>Queries open portfolio<br/>APPROVE / VETO"]
+    SENTIMENT["SentimentAgent<br/>ESPN matchup context<br/>GAME_WINNER only"]
+    ORCH["LeadAnalyst<br/>Synthesize signals<br/>Kelly fraction ≤ 15%"]
+    CRITIC["CriticAgent<br/>Adversarial review<br/>Longshot bias aware<br/>APPROVE / VETO"]
     LOGGER["TradeLogger<br/>SQLite · live_trades.db<br/>PENDING_RESOLUTION"]
     SETTLE["src/settle.py<br/>Kalshi REST poll<br/>EVALUATED + P&L"]
     PLACEHOLDER["◻ Placeholder<br/>print one-liner · drop"]
     DROPPED(("· dropped"))
-    PASSD(("· PASS"))
     VETOD(("· VETOED"))
 
     WS --> ROUTER
     ROUTER -->|"KXNBAGAME-*"| BOUNCER
     ROUTER -->|"KXNBAWINS-* / KXNBASGPROP-*"| PLACEHOLDER
     BOUNCER -->|longshot detected| QUANT
+    BOUNCER -->|longshot detected| SENTIMENT
     BOUNCER -->|mid-price or non-NBA| DROPPED
     QUANT --> ORCH
-    RESEARCH -. "not yet implemented" .-> ORCH
-    ORCH -->|READY| CRITIC
-    ORCH -->|PASS| PASSD
+    SENTIMENT --> ORCH
+    ORCH --> CRITIC
     CRITIC -->|APPROVE| LOGGER
     CRITIC -->|VETO| VETOD
     LOGGER -. "python -m src.settle" .-> SETTLE
@@ -59,13 +58,17 @@ p2p-trade-bot/
 ├── mock_database_setup.py    # Generate mock historical parquet data
 ├── requirements.txt
 │
+├── scripts/
+│   └── verify_sentiment.py   # Test ESPN tool + sentiment agent end-to-end
+│
 ├── src/
 │   ├── config.py             # Env var config (PAPER_STARTING_CASH, etc.)
-│   ├── settle.py             # ESPN-based trade resolution CLI
+│   ├── settle.py             # Kalshi REST-based trade resolution CLI
 │   │
 │   ├── agents/
-│   │   ├── orchestrator.py   # LeadAnalyst — synthesize → READY/PASS
+│   │   ├── orchestrator.py   # LeadAnalyst — parallel Quant+Sentiment synthesis
 │   │   ├── quant.py          # QuantAgent — calibration gap analysis
+│   │   ├── sentiment_agent.py # SentimentAgent — ESPN live context (GAME_WINNER)
 │   │   ├── critic.py         # CriticAgent — adversarial APPROVE/VETO
 │   │   └── researcher.py     # ResearchAgent — placeholder
 │   │
@@ -131,18 +134,34 @@ Measures the historical calibration gap at the current market price by querying 
 
 ---
 
-### LeadAnalyst (Orchestrator) — `src/agents/orchestrator.py`
+### SentimentAgent — `src/agents/sentiment_agent.py`
 
-Synthesizes the quant report and (eventually) the research report into a binary **READY / PASS** trade proposal. Also computes position sizing via the Kelly criterion.
+Enriches GAME_WINNER trade packets with live ESPN news context before the Orchestrator synthesizes. Non-GAME_WINNER packets (TOTALS, PLAYER_PROP) pass through unchanged.
 
-**Input:** `trade_packet` + `quant_report`
+**Input:** `trade_packet` (ticker, market_price, action)
 
 **Process:**
 
-1. Receives quant report with pre-computed calibration gap
+1. Checks contract type — skips if not GAME_WINNER
+2. Calls `get_espn_matchup_context(ticker)` — fetches current game status + all ESPN NBA news articles mentioning either team
+3. Uses `claude-haiku-4-5` (cheap, fast) to generate a 2–4 sentence sentiment summary
+
+**Output:** `trade_packet` with `sentiment_context` field added (string or `None` if skipped/unavailable)
+
+---
+
+### LeadAnalyst (Orchestrator) — `src/agents/orchestrator.py`
+
+Pure synthesizer that runs QuantAgent and SentimentAgent in parallel, then combines their outputs into a concise narrative for the Critic. Position sizing via the Kelly criterion is computed here.
+
+**Input:** `trade_packet`
+
+**Process:**
+
+1. Runs `QuantAgent` and `SentimentAgent` concurrently via `ThreadPoolExecutor`
 2. Computes `confidence` (HIGH / MEDIUM / LOW) and `kelly_fraction` (capped at 15%)
-3. Passes a structured `[Research Agent placeholder]` comment — when `ResearchAgent` is implemented, its output slots in here
-4. Calls Claude with the full quant report + research section; receives READY or PASS
+3. Calls `_synthesize()` — uses `claude-haiku-4-5` to merge quant report + sentiment context into a 2–4 sentence narrative
+4. Passes synthesized narrative + raw sentiment context to the Critic for evaluation
 
 **Key thresholds:**
 
@@ -153,15 +172,15 @@ Synthesizes the quant report and (eventually) the research report into a binary 
 | Min sample size                 | 200 trades             |
 | Kelly fraction cap              | 15%                    |
 
-**Output:** `{status: READY/PASS, reason, confidence, edge, kelly_fraction, ...}`
+**Output:** `{synthesized_narrative, confidence, edge, kelly_fraction, sentiment_context, ...}`
 
 ---
 
 ### CriticAgent — `src/agents/critic.py`
 
-Adversarial agent whose **only job is to find reasons to VETO**. Before calling the LLM, it queries the SQLite database for open portfolio positions and passes the correlated-exposure data into the prompt.
+Adversarial agent whose **only job is to find reasons to VETO**. Acts as the primary decision-maker (uses `claude-sonnet-4-6`). Before calling the LLM, it queries the SQLite database for open portfolio positions and passes the correlated-exposure data into the prompt.
 
-**Input:** `trade_packet` + `orchestrator_decision` (only called on READY)
+**Input:** `trade_packet` + `orchestrator_decision` (synthesized narrative + sentiment context)
 
 **Seven failure modes hunted:**
 
@@ -175,13 +194,15 @@ Adversarial agent whose **only job is to find reasons to VETO**. Before calling 
 | 6   | Liquidity trap                  | `open_interest < 500` or `volume == 0`                  |
 | 7   | Portfolio concentration         | Same-game exposure already > $15                        |
 
-**Output:** `{decision: APPROVE/VETO, veto_reason, concerns[], risk_score, summary}` merged into decision dict with final status `APPROVED` or `VETOED`
+The Critic explicitly understands **longshot bias mechanics** — BET_NO on a cheap underdog YES is the core strategy, not a red flag.
+
+**Output:** `{decision: APPROVE/VETO, veto_reason, concerns[], risk_score, sentiment_note, summary}` merged into decision dict with final status `APPROVED` or `VETOED`
 
 ---
 
 ### ResearchAgent — `src/agents/researcher.py`
 
-**Placeholder — not yet implemented.** When built, this agent will ingest news headlines, injury reports, and line-movement signals for the relevant game, returning a structured report that the orchestrator uses to upgrade or downgrade its trade proposal.
+**Placeholder — not yet implemented.** ESPN live news context is now handled by `SentimentAgent`. When built, this agent will additionally ingest injury reports and line-movement signals, returning a structured report that the orchestrator can use to adjust its synthesis.
 
 ---
 
@@ -213,14 +234,16 @@ Four query functions against `data/kalshi/{markets,trades}/*.parquet`. All queri
 
 ### `src/tools/espn_tool.py`
 
-Wrapper around the ESPN hidden NBA scoreboard API.
+Wrapper around the ESPN hidden NBA scoreboard and news APIs.
 
 **Key functions:**
 
 - `get_nba_scoreboard(date=None) → list[dict]` — fetches all games for a date (YYYYMMDD) or today; returns `{home_abbr, away_abbr, status, home_score, away_score, winner_abbr, ...}`
 - `find_game(ticker, search_days=2) → dict | None` — parses teams from KXNBAGAME ticker and finds the matching ESPN game in today's + recent scoreboards
+- `get_nba_news(limit=20) → list[dict]` — fetches raw NBA feed articles from ESPN
+- `get_espn_matchup_context(ticker) → str | None` — filters `get_nba_news()` to articles mentioning either team in the game; used by `SentimentAgent`
 
-Used by `QuantAgent` for live game context only. Settlement is handled by the Kalshi REST API, not ESPN.
+Used by `QuantAgent` for live game context and by `SentimentAgent` for news enrichment. Settlement is handled by the Kalshi REST API, not ESPN.
 
 > **Note:** Team abbreviation mapping handles mismatches between Kalshi and ESPN conventions (e.g. `GSW` → `GS`, `NOP` → `NO`, `UTA` → `UTAH`). The ticker parser uses `{2,3}` character matching to correctly split adjacent 3-char team codes (e.g. `LACBOS` → `LAC` + `BOS`).
 
@@ -280,7 +303,16 @@ After passing the filter, calls `get_market_details(ticker)` to add `market_titl
 
 Async Kalshi WebSocket connection with RSA-PSS authentication. Subscribes to the `trade` channel and routes each incoming message through `router.route()`.
 
-For `APPROVED` trades, prints the full pipeline decision (quant stats, orchestrator confidence, critic risk score) and calls `TradeLogger.log_trade()` to persist to SQLite.
+**Auto-reconnect:** The `run_forever()` method wraps the connection in an exponential backoff loop — starting at 1s, doubling each attempt, capping at 60s. The backoff resets on successful connection. The bot survives Kalshi disconnects without manual restart.
+
+For `APPROVED` trades, prints the full pipeline decision including:
+
+- Multi-angle quant stats (price bucket edge, taker win rate, longshot bias stats, inverse bucket)
+- Orchestrator confidence and Kelly fraction
+- Critic risk score
+- Live ESPN sentiment context (`📰 Sentiment` section)
+
+Calls `TradeLogger.log_trade()` to persist to SQLite.
 
 ---
 
@@ -510,16 +542,16 @@ python tests/test_pipeline.py --live
 
 ### `tests/test_settle.py` — Settlement module (mocked Kalshi REST, no keys needed)
 
-| Test | What it verifies |
-|---|---|
-| `test_run_settle_no_pending_trades` | Empty DB → prints message, API never called |
-| `test_run_settle_api_unavailable` | `get_market_details` returns None → trade stays PENDING |
-| `test_run_settle_market_still_open` | `status="open"` → trade stays PENDING |
-| `test_run_settle_market_closed_not_finalized` | `status="closed"` → trade stays PENDING |
-| `test_run_settle_market_finalized_win` | `status="finalized", result="no"` for BET_NO → EVALUATED, pnl > 0 |
-| `test_run_settle_market_finalized_loss` | `status="finalized", result="yes"` for BET_NO → EVALUATED, pnl < 0 |
-| `test_run_settle_multiple_mixed` | One finalized WIN + one open → 1 evaluated, 1 still PENDING |
-| `test_run_settle_unrecognised_result` | `result="void"` (unexpected string) → stays PENDING |
+| Test                                          | What it verifies                                                   |
+| --------------------------------------------- | ------------------------------------------------------------------ |
+| `test_run_settle_no_pending_trades`           | Empty DB → prints message, API never called                        |
+| `test_run_settle_api_unavailable`             | `get_market_details` returns None → trade stays PENDING            |
+| `test_run_settle_market_still_open`           | `status="open"` → trade stays PENDING                              |
+| `test_run_settle_market_closed_not_finalized` | `status="closed"` → trade stays PENDING                            |
+| `test_run_settle_market_finalized_win`        | `status="finalized", result="no"` for BET_NO → EVALUATED, pnl > 0  |
+| `test_run_settle_market_finalized_loss`       | `status="finalized", result="yes"` for BET_NO → EVALUATED, pnl < 0 |
+| `test_run_settle_multiple_mixed`              | One finalized WIN + one open → 1 evaluated, 1 still PENDING        |
+| `test_run_settle_unrecognised_result`         | `result="void"` (unexpected string) → stays PENDING                |
 
 ### `tests/test_websocket.py` — WebSocket client (requires `.env`)
 
@@ -542,9 +574,9 @@ Requires `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`. The full pipeline test
 
 ### 2. Researcher Agent (Fundamental & News Analysis)
 
-- **Status:** Currently a placeholder in `src/agents/researcher.py`.
-- **Purpose:** To parse unstructured text for late-breaking news, injuries, and lineup changes that quantitative models and slow-moving sportsbooks miss.
-- **Data Sources:** ESPN Hidden API (`/nba/news`) and Reddit API (PRAW) scraping `r/nba`.
+- **Status:** ESPN live news context is now implemented via `SentimentAgent` (`src/agents/sentiment_agent.py`). The full `ResearchAgent` placeholder remains in `src/agents/researcher.py`.
+- **Purpose:** To parse unstructured text for late-breaking injuries and lineup changes that quantitative models and slow-moving sportsbooks miss.
+- **Remaining work:** Injury reports and line-movement signals.
 - **Agentic Role:** Reads qualitative news, assesses severity, and outputs a structured probability modifier to the Orchestrator to adjust the baseline odds.
 
 ### 3. Build Out Totals & Player Props Pipelines

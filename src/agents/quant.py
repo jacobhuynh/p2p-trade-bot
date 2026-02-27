@@ -28,6 +28,39 @@ from src.tools.duckdb_tool import (
     get_market_volume_stats,
 )
 
+
+def _contracts_at_price(orderbook: dict | None, yes_price: int, action: str) -> int | None:
+    """
+    Return the number of contracts available in the live order book at our target price.
+
+    Three-state return:
+      None  — orderbook is None (offline / creds missing / network error) → depth unknown
+      0     — orderbook available but our target price has no contracts → confirmed empty
+      N > 0 — N contracts available at our price → can fill up to N contracts
+
+    For BET_NO: we buy NO contracts. The order book's "no" side lists available NO
+    contracts at each no_price (= 100 - yes_price).
+    For BET_YES: we buy YES contracts. The "yes" side lists available YES contracts.
+
+    Kalshi order book format: {"yes": [[price, size], ...], "no": [[price, size], ...]}
+    """
+    if orderbook is None:
+        return None
+
+    if action == "BET_NO":
+        target_price = 100 - yes_price
+        entries = orderbook.get("no", [])
+    else:
+        target_price = yes_price
+        entries = orderbook.get("yes", [])
+
+    for entry in entries:
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            if int(entry[0]) == target_price:
+                return int(entry[1])
+
+    return 0  # price not found in book — confirmed zero depth
+
 _SYSTEM_PROMPT = """You are a quantitative analyst for a Kalshi prediction market trading bot.
 
 All numerical calculations (calibration gap, implied probability, verdict) have already
@@ -96,6 +129,7 @@ class QuantAgent:
         # ── Fetch live context (graceful — never blocks the pipeline) ──────────
         game_context: dict | None = None
         team_stats:   dict | None = None
+        orderbook_depth_at_price: int | None = None
 
         try:
             from src.tools.espn_tool import find_game
@@ -106,6 +140,13 @@ class QuantAgent:
         try:
             from src.tools.nba_tool import get_team_recent_records
             team_stats = get_team_recent_records(ticker)
+        except Exception:
+            pass
+
+        try:
+            from src.tools.kalshi_rest import get_orderbook
+            orderbook = get_orderbook(ticker)
+            orderbook_depth_at_price = _contracts_at_price(orderbook, price, action)
         except Exception:
             pass
 
@@ -146,21 +187,24 @@ Write a single-sentence qualitative summary.  Use the pre-computed values — do
 
         # ── Assemble and return — same keys as before so downstream is unchanged ─
         return {
-            "historical_edge":    calibration_gap,
-            "actual_win_rate":    actual_win_rate,
-            "implied_prob":       implied_prob,
-            "no_win_rate":        bias_data.get("no_win_rate"),
-            "yes_no_asymmetry":   yes_no_asymmetry,
-            "sample_size":        sample_size,
-            "data_quality":       data_quality,
-            "verdict":            verdict,
-            "calibration_gap":    calibration_gap,
-            "summary":            summary,
-            "game_context":       game_context,
-            "team_stats":         team_stats,
+            "historical_edge":          calibration_gap,
+            "actual_win_rate":          actual_win_rate,
+            "implied_prob":             implied_prob,
+            "no_win_rate":              bias_data.get("no_win_rate"),
+            "yes_no_asymmetry":         yes_no_asymmetry,
+            "sample_size":              sample_size,
+            "data_quality":             data_quality,
+            "verdict":                  verdict,
+            "calibration_gap":          calibration_gap,
+            "summary":                  summary,
+            "game_context":             game_context,
+            "team_stats":               team_stats,
+            # ── Live liquidity ──────────────────────────────────────────────────
+            # orderbook_depth_at_price: None = unknown (offline), 0 = confirmed empty, N = available
+            "orderbook_depth_at_price": orderbook_depth_at_price,
             # ── Raw query results — separate DuckDB queries, different population cuts ──
-            "price_bucket_edge":  edge_data,    # get_price_bucket_edge(price, action)
-            "longshot_bias":      bias_data,    # get_longshot_bias_stats(price)
-            "taker_win_rate":     win_data,     # get_historical_win_rate(price)
-            "inverse_bucket":     inverse_edge, # get_price_bucket_edge(100-price, opposite)
+            "price_bucket_edge":        edge_data,    # get_price_bucket_edge(price, action)
+            "longshot_bias":            bias_data,    # get_longshot_bias_stats(price)
+            "taker_win_rate":           win_data,     # get_historical_win_rate(price)
+            "inverse_bucket":           inverse_edge, # get_price_bucket_edge(100-price, opposite)
         }

@@ -18,6 +18,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.config import PAPER_STARTING_CASH
+
+# Per-trade stake bounds (in dollars)
+_MIN_STAKE = 2.0
+_MAX_STAKE = 20.0
+
 
 _DEFAULT_DB = "data/live_trades.db"
 
@@ -63,19 +69,23 @@ class TradeLogger:
 
     # ── Write ────────────────────────────────────────────────────────────────
 
-    def log_trade(self, decision: dict, trade_packet: dict, stake: float = 10.0) -> int:
+    def log_trade(self, decision: dict, trade_packet: dict) -> int:
         """
         Insert a new PENDING_RESOLUTION trade row.  Returns the auto-incremented row id.
 
-        Position sizing:
-          entry_cents = yes_price        for BET_YES
-          entry_cents = 100 - yes_price  for BET_NO
-          contracts   = max(1, floor(stake / (entry_cents / 100)))
-          cost_usd    = contracts * entry_cents / 100
+        Position sizing (Kelly-scaled):
+          kelly_fraction from the orchestrator decision (0.0075 – 0.15)
+          stake         = clamp(kelly * PAPER_STARTING_CASH, _MIN_STAKE, _MAX_STAKE)
+          entry_cents   = yes_price        for BET_YES
+                        = 100 - yes_price  for BET_NO
+          contracts     = max(1, floor(stake / (entry_cents / 100)))
+          cost_usd      = contracts * entry_cents / 100
         """
         action      = decision.get("action", "")
         side        = decision.get("side", "")
         yes_price   = int(decision.get("price", 0))
+        kelly       = decision.get("kelly_fraction") or 0.02
+        stake       = max(_MIN_STAKE, min(kelly * PAPER_STARTING_CASH, _MAX_STAKE))
         entry_cents = yes_price if action == "BET_YES" else (100 - yes_price)
         contracts   = max(1, math.floor(stake / (entry_cents / 100)))
         cost_usd    = round(contracts * entry_cents / 100, 4)
