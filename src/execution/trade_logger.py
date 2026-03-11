@@ -168,6 +168,14 @@ class TradeLogger:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def evaluated_trades(self) -> list[dict]:
+        """Return all EVALUATED rows as plain dicts."""
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT * FROM live_trades WHERE status = 'EVALUATED' ORDER BY id"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def summary(self) -> dict:
         """P&L summary across all EVALUATED trades."""
         with self._conn() as con:
@@ -187,9 +195,10 @@ class TradeLogger:
             total_pnl    = row["total_pnl"]
             total_staked = row["total_staked"]
             return {
-                "n_trades":    n_trades,
-                "n_wins":      n_wins,
-                "total_pnl":   round(total_pnl, 4),
-                "win_rate":    round(n_wins / n_trades, 4) if n_trades else 0.0,
-                "roi":         round(total_pnl / total_staked, 4) if total_staked else 0.0,
+                "n_trades":     n_trades,
+                "n_wins":       n_wins,
+                "total_pnl":    round(total_pnl, 4),
+                "total_staked": round(total_staked, 4),
+                "win_rate":     round(n_wins / n_trades, 4) if n_trades else 0.0,
+                "roi":          round(total_pnl / total_staked, 4) if total_staked else 0.0,
             }
