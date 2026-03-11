@@ -81,6 +81,8 @@ p2p-trade-bot/
 │   │   ├── trade_logger.py    # SQLite trade log (PENDING_RESOLUTION → EVALUATED)
 │   │   └── trade_manager.py   # PaperTradeManager — position book + CSV logs
 │   │
+│   ├── report_trades.py       # CLI: report evaluated trades, bankroll, and market stats
+│   │
 │   └── tools/
 │       ├── kalshi_rest.py    # Kalshi REST API (RSA-PSS auth)
 │       ├── duckdb_tool.py    # Historical parquet queries
@@ -384,6 +386,12 @@ python -m src.settle
 2. Skips if API unavailable or `status != "finalized"`
 3. Reads `result` field directly (`"yes"` or `"no"`)
 4. Calls `logger.evaluate_trade(id, result)` → sets `EVALUATED` with P&L
+
+For a quick summary of all evaluated trades, bankroll, and markets traded:
+
+```bash
+python -m src.report_trades
+```
 
 ---
 
