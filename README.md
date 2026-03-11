@@ -66,19 +66,20 @@ p2p-trade-bot/
 │   ├── settle.py             # Kalshi REST-based trade resolution CLI
 │   │
 │   ├── agents/
-│   │   ├── orchestrator.py   # LeadAnalyst — parallel Quant+Sentiment synthesis
-│   │   ├── quant.py          # QuantAgent — calibration gap analysis
+│   │   ├── orchestrator.py    # LeadAnalyst — parallel Quant+Sentiment synthesis
+│   │   ├── quant.py           # QuantAgent — calibration gap analysis
 │   │   ├── sentiment_agent.py # SentimentAgent — ESPN live context (GAME_WINNER)
-│   │   ├── critic.py         # CriticAgent — adversarial APPROVE/VETO
-│   │   └── researcher.py     # ResearchAgent — placeholder
+│   │   ├── critic.py          # CriticAgent — adversarial APPROVE/VETO
+│   │   └── researcher.py      # ResearchAgent — unused placeholder
 │   │
 │   ├── pipeline/
-│   │   ├── router.py         # Ticker classifier + market dispatcher
-│   │   ├── bouncer.py        # Longshot filter + REST enrichment
+│   │   ├── router.py          # Ticker classifier + market dispatcher
+│   │   ├── bouncer.py         # Longshot filter + REST enrichment
 │   │   └── websocket_client.py  # Async Kalshi WebSocket stream
 │   │
 │   ├── execution/
-│   │   └── trade_logger.py   # SQLite trade log (PENDING_RESOLUTION → EVALUATED)
+│   │   ├── trade_logger.py    # SQLite trade log (PENDING_RESOLUTION → EVALUATED)
+│   │   └── trade_manager.py   # PaperTradeManager — position book + CSV logs
 │   │
 │   └── tools/
 │       ├── kalshi_rest.py    # Kalshi REST API (RSA-PSS auth)
@@ -202,7 +203,7 @@ The Critic explicitly understands **longshot bias mechanics** — BET_NO on a ch
 
 ### ResearchAgent — `src/agents/researcher.py`
 
-**Placeholder — not yet implemented.** ESPN live news context is now handled by `SentimentAgent`. When built, this agent will additionally ingest injury reports and line-movement signals, returning a structured report that the orchestrator can use to adjust its synthesis.
+**Unused placeholder.** ESPN live news context is fully handled by `SentimentAgent`. This file is retained for reference but plays no role in the pipeline.
 
 ---
 
@@ -317,6 +318,27 @@ Calls `TradeLogger.log_trade()` to persist to SQLite.
 ---
 
 ## Execution Layer
+
+### PaperTradeManager — `src/execution/trade_manager.py`
+
+File-backed paper trading simulator. Zero network calls — records simulated fills to local files under `data/paper/`.
+
+**Files written:**
+
+| File          | Description                                               |
+| ------------- | --------------------------------------------------------- |
+| `book.json`   | Current portfolio state: cash, open positions, realized P&L |
+| `trades.csv`  | Append-only log of every simulated fill                   |
+| `equity.csv`  | Append-only equity-curve snapshot after each trade        |
+
+**Contract sizing:**
+- `risk_fraction = min(kelly_fraction, 2%)` — never risks more than 2% of cash per trade
+- `contracts = floor(cash × risk_fraction / cost_per_contract)`, capped at `PAPER_MAX_CONTRACTS`
+- Scales down automatically if sizing would exceed available cash
+
+Also includes `LiveTradeManager` (raises `NotImplementedError`) as a placeholder for real Kalshi order execution.
+
+---
 
 ### TradeLogger — `src/execution/trade_logger.py`
 
@@ -572,20 +594,13 @@ Requires `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH`. The full pipeline test
 - **Market Consensus Baseline:** Upgrade all pipelines to ingest live odds from sharp traditional sportsbooks (e.g., Pinnacle, DraftKings) via an external odds API.
 - **The Mathematical Edge:** Evolve the Quant Agent from purely analyzing historical calibration gaps to calculating the real-time edge between Kalshi's implied probability and the sharp consensus market.
 
-### 2. Researcher Agent (Fundamental & News Analysis)
-
-- **Status:** ESPN live news context is now implemented via `SentimentAgent` (`src/agents/sentiment_agent.py`). The full `ResearchAgent` placeholder remains in `src/agents/researcher.py`.
-- **Purpose:** To parse unstructured text for late-breaking injuries and lineup changes that quantitative models and slow-moving sportsbooks miss.
-- **Remaining work:** Injury reports and line-movement signals.
-- **Agentic Role:** Reads qualitative news, assesses severity, and outputs a structured probability modifier to the Orchestrator to adjust the baseline odds.
-
-### 3. Build Out Totals & Player Props Pipelines
+### 2. Build Out Totals & Player Props Pipelines
 
 - **Status:** Currently routed in `src/pipeline/router.py` but drop out as placeholders.
 - **Totals (Over/Under):** Implement logic to weigh pace of play, offensive/defensive ratings (via `nba_api`), back-to-backs, and travel fatigue against the consensus line.
-- **Player Props:** Implement the Top-Down Market Consensus engine. Compare external consensus odds with Kalshi to identify stale lines, while using the Researcher Agent to adjust for usage rate shifts if a star player is unexpectedly scratched.
+- **Player Props:** Implement the Top-Down Market Consensus engine. Compare external consensus odds with Kalshi to identify stale lines, while using the SentimentAgent to surface injury and lineup news that could affect player usage rates.
 
-### 4. Granular Performance Tracking by Market Type
+### 3. Granular Performance Tracking by Market Type
 
 - **Status:** Basic mock execution and ESPN settlement (`src/settle.py`) are implemented.
 - **Next Steps:** Update the `data/live_trades.db` SQLite schema to include a `market_type` column (`GAME_WINNER`, `TOTALS`, `PLAYER_PROP`).
