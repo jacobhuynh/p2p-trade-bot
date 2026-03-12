@@ -1,0 +1,10 @@
+{
+  "bankroll": 1000.0,
+  "final_cash": 1094.4,
+  "total_pnl": 94.4,
+  "n_trades": 106,
+  "n_wins": 95,
+  "win_rate": 0.8962,
+  "roi": 0.0944,
+  "max_drawdown": 22.24
+}
