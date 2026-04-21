@@ -18,7 +18,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.tools.nba_tool import _parse_teams_from_ticker, get_team_recent_records
+from src.tools.nba_team_tool import _parse_teams_from_ticker, get_team_recent_records
 
 
 # ── Pure-logic: ticker parsing ────────────────────────────────────────────────

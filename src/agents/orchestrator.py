@@ -78,14 +78,16 @@ def _confidence(edge: float, sample_size: int) -> str:
 
 class LeadAnalyst:
     def __init__(self):
-        from src.agents.quant import QuantAgent
+        from src.agents.game_quant_agent import QuantAgent
+        from src.agents.prop_agent import PlayerPropAgent
         from src.agents.critic import CriticAgent
         from src.agents.sentiment_agent import SentimentAgent
 
-        self.role    = "Lead Trading Orchestrator"
+        self.role         = "Lead Trading Orchestrator"
         self.sentiment_agent = SentimentAgent()
-        self.quant   = QuantAgent()
-        self.critic  = CriticAgent()
+        self.quant        = QuantAgent()
+        self.prop_agent   = PlayerPropAgent()
+        self.critic       = CriticAgent()
 
     def _synthesize(
         self,
@@ -211,5 +213,149 @@ Write one short paragraph (2-4 sentences) that combines the quantitative edge an
             "timestamp":           datetime.now(timezone.utc).isoformat(),
             "status":              "READY",
             "reason":              ready_reason,
+        }
+        return self.critic.review(trade_packet, trade_proposal)
+
+    # ── Player prop pipeline ─────────────────────────────────────────────────
+
+    def _synthesize_prop(
+        self,
+        prop_result: dict,
+        sentiment_context: str | None,
+        player_name: str,
+        prop_type: str,
+        prop_threshold,
+    ) -> str | None:
+        """
+        Combine PropAgent result and sentiment into a short narrative for the Critic.
+        Uses claude-haiku-4-5. Returns None on failure (pipeline continues with fallback).
+        """
+        hit_rate    = prop_result.get("hit_rate")
+        verdict     = prop_result.get("verdict")
+        n_games     = prop_result.get("n_games_sampled", 0)
+        prop_summary = prop_result.get("summary") or "(no prop summary)"
+        sentiment    = (sentiment_context or "").strip() or "No live player news available."
+
+        prompt = f"""Player: {player_name} | Prop: {prop_type} {prop_threshold}+
+
+Prop Analysis: hit_rate={hit_rate}, verdict={verdict}, n_games_sampled={n_games}. Summary: {prop_summary}
+
+Player News (live ESPN): {sentiment}
+
+Write one short paragraph (2-4 sentences) that combines the stat-based edge with the live player news. One coherent narrative for a trading Critic to review. Output only the paragraph, no labels."""
+
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage
+            llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0)
+            response = llm.invoke([HumanMessage(content=prompt)])
+            out = (response.content or "").strip()
+            return out if out else None
+        except Exception:
+            return f"Prop: {prop_summary} News: {sentiment}"
+
+    def analyze_prop_signal(self, trade_packet: dict) -> dict:
+        """
+        Full pipeline for PLAYER_PROP trades:
+          0. PropAgent and SentimentAgent run in parallel.
+          1. Python-only gate — PASS if no edge or insufficient data.
+          2. Synthesize prop analysis + player sentiment into one report.
+          3. Critic — adversarial APPROVE/VETO.
+
+        Maps prop metrics into the quant_summary shape so the Critic's
+        existing interface works without modification.
+        """
+        packet_copy = dict(trade_packet)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_prop      = executor.submit(self.prop_agent.analyze, trade_packet)
+            future_sentiment = executor.submit(self.sentiment_agent.enrich, packet_copy)
+            prop_result      = future_prop.result()
+            future_sentiment.result()
+        trade_packet["sentiment_context"] = packet_copy.get("sentiment_context")
+        sentiment_context = trade_packet.get("sentiment_context")
+
+        ticker         = trade_packet.get("ticker")
+        price          = trade_packet.get("market_price")
+        action         = prop_result.get("action") or trade_packet.get("action")
+        side           = "no" if action == "BET_NO" else "yes"
+        player_name    = prop_result.get("player_name", trade_packet.get("player_name", ""))
+        prop_type      = prop_result.get("prop_type", "")
+        prop_threshold = prop_result.get("prop_threshold")
+
+        hit_rate  = prop_result.get("hit_rate")
+        verdict   = prop_result.get("verdict")
+        n_games   = prop_result.get("n_games_sampled", 0)
+        kelly     = prop_result.get("kelly_fraction", 0.01)
+        confidence = prop_result.get("confidence", "LOW")
+
+        # ── Gate: no edge or insufficient data → PASS ─────────────────────────
+        if verdict == "INSUFFICIENT_DATA":
+            reason = f"Insufficient data — only {n_games} games sampled (need ≥ 5)"
+            gate_pass = True
+        elif hit_rate is None or hit_rate <= 0.50:
+            reason = f"No prop edge — hit_rate={hit_rate} ≤ 0.50"
+            gate_pass = True
+        else:
+            gate_pass = False
+
+        if gate_pass:
+            return {
+                "action":            "PASS",
+                "ticker":            ticker,
+                "side":              None,
+                "confidence":        confidence,
+                "edge":              hit_rate,
+                "price":             price,
+                "kelly_fraction":    0.0,
+                "quant_summary":     prop_result,
+                "sentiment_context": sentiment_context,
+                "timestamp":         datetime.now(timezone.utc).isoformat(),
+                "status":            "PASS",
+                "reason":            reason,
+                "player_name":       player_name,
+                "prop_type":         prop_type,
+                "prop_threshold":    prop_threshold,
+            }
+
+        # ── Synthesize for Critic ──────────────────────────────────────────────
+        synthesized_report = self._synthesize_prop(
+            prop_result, sentiment_context, player_name, prop_type, prop_threshold
+        )
+
+        # Map prop metrics into quant_summary shape for Critic compatibility
+        quant_summary_for_critic = {
+            "calibration_gap":  prop_result.get("edge"),        # recent_avg - threshold
+            "actual_win_rate":  hit_rate,
+            "sample_size":      n_games,
+            "verdict":          verdict,
+            "implied_prob":     None,
+            "data_quality":     "SUFFICIENT" if n_games >= 5 else "INSUFFICIENT",
+            "summary":          prop_result.get("summary"),
+            # Prop-specific extras for Critic context
+            "hit_rate":         hit_rate,
+            "variance":         prop_result.get("variance"),
+            "recent_avg":       prop_result.get("recent_avg"),
+            "prop_threshold":   prop_threshold,
+            "n_games_sampled":  n_games,
+            "matchup_context":  prop_result.get("matchup_context"),
+        }
+
+        trade_proposal = {
+            "action":             action,
+            "ticker":             ticker,
+            "side":               side,
+            "confidence":         confidence,
+            "edge":               hit_rate,
+            "price":              price,
+            "kelly_fraction":     kelly,
+            "synthesized_report": synthesized_report,
+            "quant_summary":      quant_summary_for_critic,
+            "sentiment_context":  sentiment_context,
+            "timestamp":          datetime.now(timezone.utc).isoformat(),
+            "status":             "READY",
+            "reason":             "Positive prop edge — forwarding to Critic for final review",
+            "player_name":        player_name,
+            "prop_type":          prop_type,
+            "prop_threshold":     prop_threshold,
         }
         return self.critic.review(trade_packet, trade_proposal)

@@ -1,7 +1,7 @@
 """
-src/agents/quant.py
+src/agents/game_quant_agent.py
 
-The Quant Agent — Historical Edge / Calibration Gap Analyzer.
+The Quant Agent — Historical Edge / Calibration Gap Analyzer for GAME_WINNER markets.
 
 Key insight: we never query by ticker (live tickers won't exist in historical DB).
 Instead we query by PRICE BUCKET across all finalized NBA markets.
@@ -29,51 +29,19 @@ from src.tools.duckdb_tool import (
 )
 
 
-def _contracts_at_price(orderbook: dict | None, yes_price: int, action: str) -> int | None:
-    """
-    Return the number of contracts available in the live order book at our target price.
-
-    Three-state return:
-      None  — orderbook is None (offline / creds missing / network error) → depth unknown
-      0     — orderbook available but our target price has no contracts → confirmed empty
-      N > 0 — N contracts available at our price → can fill up to N contracts
-
-    For BET_NO: we buy NO contracts. The order book's "no" side lists available NO
-    contracts at each no_price (= 100 - yes_price).
-    For BET_YES: we buy YES contracts. The "yes" side lists available YES contracts.
-
-    Kalshi order book format: {"yes": [[price, size], ...], "no": [[price, size], ...]}
-    """
-    if orderbook is None:
-        return None
-
-    if action == "BET_NO":
-        target_price = 100 - yes_price
-        entries = orderbook.get("no", [])
-    else:
-        target_price = yes_price
-        entries = orderbook.get("yes", [])
-
-    for entry in entries:
-        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-            if int(entry[0]) == target_price:
-                return int(entry[1])
-
-    return 0  # price not found in book — confirmed zero depth
 
 _SYSTEM_PROMPT = """You are a quantitative analyst for a Kalshi prediction market trading bot.
 
 All numerical calculations (calibration gap, implied probability, verdict) have already
 been computed in Python and are provided to you as verified facts.  Do NOT recompute them.
 
-Your ONLY task is to write a single-sentence qualitative summary that:
-  - States the calibration gap and verdict in plain English
-  - Integrates any live game context (ESPN status, injury flags) if available
-  - Notes team momentum from recent records if available
-  - Flags any data quality concerns (low sample, perfect win rate, etc.)
+Your task is to write a 3-sentence qualitative summary:
+  Sentence 1 — Edge: State the calibration gap, verdict, and implied vs. actual win rate.
+  Sentence 2 — Context: Note team momentum (recent records), live game status, and any key player trends (hot/cold streaks, scoring leaders) if available.
+  Sentence 3 — Risk: Flag data quality concerns (low sample, perfect win rate, low liquidity) or reasons this edge might not hold.
 
 Respond ONLY with a JSON object — no extra text:
-{"summary": "<one sentence>"}
+{"summary": "<three sentences>"}
 """
 
 
@@ -129,8 +97,8 @@ class QuantAgent:
         # ── Fetch live context (graceful — never blocks the pipeline) ──────────
         game_context: dict | None = None
         team_stats:   dict | None = None
-        orderbook_depth_at_price: int | None = None
-
+        home_key_players: list | None = None
+        away_key_players: list | None = None
         try:
             from src.tools.espn_tool import find_game
             game_context = find_game(ticker)
@@ -138,19 +106,36 @@ class QuantAgent:
             pass
 
         try:
-            from src.tools.nba_tool import get_team_recent_records
+            from src.tools.nba_team_tool import get_team_recent_records, _parse_teams_from_ticker
             team_stats = get_team_recent_records(ticker)
+            parsed = _parse_teams_from_ticker(ticker)
+            if parsed:
+                from src.tools.nba_player_stats_tool import get_team_key_players
+                home_abbr, away_abbr = parsed
+                home_key_players = get_team_key_players(home_abbr)
+                away_key_players = get_team_key_players(away_abbr)
         except Exception:
             pass
 
-        try:
-            from src.tools.kalshi_rest import get_orderbook
-            orderbook = get_orderbook(ticker)
-            orderbook_depth_at_price = _contracts_at_price(orderbook, price, action)
-        except Exception:
-            pass
+        # Orderbook depth check removed — snapshot depth is unreliable (resting orders
+        # at a price can be 0 immediately after a trade even with active liquidity).
+        # orderbook_depth_at_price stays None (unknown) so the critic skips the check.
 
         # ── Ask LLM for qualitative summary only ──────────────────────────────
+        def _fmt_key_players(players: list | None, abbr: str) -> str:
+            if not players:
+                return f"{abbr}: unavailable"
+            lines = [f"{abbr} key players:"]
+            for p in players:
+                l5 = ", ".join(str(x) for x in p.get("last5_pts", []))
+                lines.append(
+                    f"  {p['name']}: {p['avg_pts']}pts/{p['avg_reb']}reb/{p['avg_ast']}ast avg  last5_pts=[{l5}]"
+                )
+            return "\n".join(lines)
+
+        home_abbr_str = (team_stats or {}).get("home", {}).get("abbr", "HOME") if team_stats else "HOME"
+        away_abbr_str = (team_stats or {}).get("away", {}).get("abbr", "AWAY") if team_stats else "AWAY"
+
         human_msg = f"""Pre-computed Analysis:
 Ticker:          {ticker}
 Price:           {price}c
@@ -168,9 +153,13 @@ Live ESPN Context:
 {json.dumps(game_context, indent=2) if game_context else "No game found for today/yesterday."}
 
 Team Recent Records (nba_api):
-{json.dumps(team_stats, indent=2) if team_stats else "nba_api data unavailable."}
+{json.dumps(team_stats, indent=2) if team_stats else "unavailable"}
 
-Write a single-sentence qualitative summary.  Use the pre-computed values — do not recalculate.
+Key Player Stats — last 10 games average (nba_api):
+{_fmt_key_players(home_key_players, home_abbr_str)}
+{_fmt_key_players(away_key_players, away_abbr_str)}
+
+Write a 3-sentence qualitative summary.  Use the pre-computed values — do not recalculate.
 """
 
         try:
@@ -199,9 +188,8 @@ Write a single-sentence qualitative summary.  Use the pre-computed values — do
             "summary":                  summary,
             "game_context":             game_context,
             "team_stats":               team_stats,
-            # ── Live liquidity ──────────────────────────────────────────────────
-            # orderbook_depth_at_price: None = unknown (offline), 0 = confirmed empty, N = available
-            "orderbook_depth_at_price": orderbook_depth_at_price,
+            "home_key_players":         home_key_players,
+            "away_key_players":         away_key_players,
             # ── Raw query results — separate DuckDB queries, different population cuts ──
             "price_bucket_edge":        edge_data,    # get_price_bucket_edge(price, action)
             "longshot_bias":            bias_data,    # get_longshot_bias_stats(price)

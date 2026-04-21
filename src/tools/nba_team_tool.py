@@ -1,7 +1,7 @@
 """
-src/tools/nba_tool.py
+src/tools/nba_team_tool.py
 
-Lightweight nba_api wrapper for the Quant Agent.
+Lightweight nba_api wrapper for team-level W/L records (GAME_WINNER markets).
 
 Parses team abbreviations from a KXNBAGAME Kalshi ticker and fetches
 each team's recent W/L record via the NBA Stats API.

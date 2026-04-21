@@ -5,6 +5,7 @@ import time
 import base64
 import websockets
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -12,7 +13,7 @@ from src.pipeline import router
 from src.agents.orchestrator import LeadAnalyst
 from src.execution.trade_logger import TradeLogger
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 class KalshiWebsocketClient:
     def __init__(self):
@@ -21,7 +22,7 @@ class KalshiWebsocketClient:
         self.uri = "wss://api.elections.kalshi.com/trade-api/ws/v2"
         self.private_key = self._load_private_key()
         self.analyst = LeadAnalyst()
-        self.logger = TradeLogger()
+        self.logger  = TradeLogger()
 
     def _load_private_key(self):
         with open(self.private_key_path, "rb") as key_file:
@@ -58,7 +59,7 @@ class KalshiWebsocketClient:
             await websocket.send(json.dumps({
                 "id": 1, "cmd": "subscribe", "params": {"channels": ["trade"]}
             }))
-            print("📡 Listening for NBA trades (Game Winners → full pipeline | Totals/Props → placeholder)...")
+            print("📡 Listening for NBA trades (Game Winners → full pipeline | Props → PlayerPropAgent | Totals → placeholder)...")
 
             async for message in websocket:
                 data = json.loads(message)
@@ -160,9 +161,74 @@ class KalshiWebsocketClient:
 
                 print(f"{'='*60}")
 
-            elif market_type in ("TOTALS", "PLAYER_PROP"):
-                # Placeholder handlers print their own one-liner inside router.py.
-                # Nothing more to do here until real strategies are implemented.
+            elif market_type == "PLAYER_PROP" and trade_packet:
+                # ── Full prop pipeline: PropAgent + Sentiment → Orchestrator → Critic ──
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                decision  = await asyncio.to_thread(self.analyst.analyze_prop_signal, trade_packet)
+                quant     = decision.get("quant_summary", {})
+                critic    = decision.get("critic", {})
+                status    = decision.get("status")
+                player    = decision.get("player_name") or trade_packet.get("player_name", "?")
+                prop_label = f"{decision.get('prop_type') or quant.get('prop_type', '?')} {decision.get('prop_threshold') or quant.get('prop_threshold', '?')}+"
+
+                status_emoji = {
+                    "APPROVED": "✅", "VETOED": "🚫", "PASS": "⏭️",
+                }.get(status, "❓")
+
+                print(f"\n{'='*60}")
+                print(f"🏀 PLAYER PROP | {timestamp}  {status_emoji} {status}")
+                print(f"{'='*60}")
+                print(f"📌 Ticker:      {trade_packet['ticker']}")
+                print(f"👤 Player:      {player}  |  {prop_label}")
+                print(f"🎯 Action:      {decision.get('action')}  @ {decision.get('price')}¢")
+                print(f"{'─'*60}")
+                sc = trade_packet.get("sentiment_context") or decision.get("sentiment_context")
+                print(f"📰 Sentiment (player news)")
+                if sc:
+                    for line in sc.strip().splitlines():
+                        print(f"   {line}")
+                else:
+                    print(f"   (no player news found)")
+                print(f"{'─'*60}")
+                print(f"📊 Prop Stats")
+                print(f"   Hit Rate:    {quant.get('actual_win_rate') or quant.get('hit_rate')}")
+                print(f"   Avg vs Line: {quant.get('recent_avg')} vs {quant.get('prop_threshold')}")
+                print(f"   Edge:        {quant.get('calibration_gap')}")
+                print(f"   Variance:    {quant.get('variance')}")
+                print(f"   Sample:      {quant.get('sample_size') or quant.get('n_games_sampled')} games  [{quant.get('data_quality')}]")
+                print(f"   Verdict:     {quant.get('verdict')}")
+                mc = quant.get("matchup_context")
+                if mc:
+                    print(f"   vs Opp:      pts={mc.get('avg_pts_vs_opp')} reb={mc.get('avg_reb_vs_opp')} ast={mc.get('avg_ast_vs_opp')}  (n={mc.get('n_games')})")
+                print(f"   Summary:     {quant.get('summary')}")
+                print(f"{'─'*60}")
+                print(f"🧠 Orchestrator")
+                print(f"   Confidence:  {decision.get('confidence')}")
+                print(f"   Edge:        {decision.get('edge')}")
+                print(f"   Kelly:       {decision.get('kelly_fraction')}")
+                print(f"   Reason:      {decision.get('reason')}")
+
+                if critic:
+                    print(f"{'─'*60}")
+                    print(f"🔍 Critic")
+                    print(f"   Decision:    {critic.get('decision')}")
+                    print(f"   Risk Score:  {critic.get('risk_score')}/10")
+                    if critic.get("veto_reason"):
+                        print(f"   Veto:        {critic.get('veto_reason')}")
+                    if critic.get("concerns"):
+                        for c in critic["concerns"]:
+                            print(f"   ⚠️  {c}")
+                    print(f"   Summary:     {critic.get('summary')}")
+                    print(f"   Sentiment:   {critic.get('sentiment_note', '')}")
+
+                if status == "APPROVED":
+                    trade_id = self.logger.log_trade(decision, trade_packet)
+                    print(f"{'─'*60}")
+                    print(f"💾 Logged as trade #{trade_id}")
+                print(f"{'='*60}")
+
+            elif market_type == "TOTALS":
+                # Placeholder — strategy not yet implemented.
                 pass
 
             else:

@@ -30,6 +30,9 @@ def test_classify_kxnbagame_prefix_only():
 def test_classify_kxnbawins():
     assert classify_market("KXNBAWINS-25-BOS") == "TOTALS"
 
+def test_classify_kxnbapts():
+    assert classify_market("KXNBAPTS-26APR20ATLNYK-NYKKTOWNS32-30") == "PLAYER_PROP"
+
 def test_classify_kxnbasgprop():
     assert classify_market("KXNBASGPROP-25JAN15LBJ-PTS30") == "PLAYER_PROP"
 

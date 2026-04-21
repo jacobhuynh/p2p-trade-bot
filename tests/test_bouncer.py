@@ -90,6 +90,16 @@ def test_rest_failure_handled(mock_rest):
     assert result["market_title"] == "Unknown"
     print(f"✅ REST failure handled gracefully: {result}")
 
+@patch("src.pipeline.bouncer.get_market_details", return_value=mock_market_response)
+def test_yes_price_dollars_field(mock_rest):
+    """Kalshi WebSocket sends yes_price_dollars as a decimal string — should normalise to int cents."""
+    trade = {"market_ticker": "KXNBAGAME-26APR20TORCLE-TOR", "yes_price_dollars": "0.1500"}
+    result = bouncer.process_trade(trade)
+    assert result is not None
+    assert result["market_price"] == 15
+    assert result["action"] == "BET_NO"
+    print("✅ yes_price_dollars normalised correctly.")
+
 if __name__ == "__main__":
     test_nba_longshot_yes_side()
     test_nba_longshot_no_side()

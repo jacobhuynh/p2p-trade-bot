@@ -48,11 +48,18 @@ class SentimentAgent:
 
     def enrich(self, trade_packet: dict) -> dict:
         """
-        If contract_type is GAME_WINNER, fetch ESPN matchup context via tool,
-        summarize with the LLM, and set trade_packet["sentiment_context"].
-        Otherwise return the packet unchanged.
+        Fetch live context and summarize into trade_packet["sentiment_context"].
+
+        GAME_WINNER  — fetches ESPN game status + team news for the matchup.
+        PLAYER_PROP  — fetches ESPN NBA headlines and filters for the player name.
+        All other contract types return the packet unchanged.
         """
-        if trade_packet.get("contract_type") != "GAME_WINNER":
+        contract_type = trade_packet.get("contract_type")
+
+        if contract_type == "PLAYER_PROP":
+            return self._enrich_prop(trade_packet)
+
+        if contract_type != "GAME_WINNER":
             return trade_packet
 
         ticker = trade_packet.get("ticker", "")
@@ -101,4 +108,63 @@ class SentimentAgent:
 
         summary = (response.content or "").strip() if hasattr(response, "content") else ""
         trade_packet["sentiment_context"] = summary if summary else None
+        return trade_packet
+
+    def _enrich_prop(self, trade_packet: dict) -> dict:
+        """
+        Fetch ESPN NBA headlines, filter for the player name, and summarize
+        player-specific context: injury status, usage, lineup changes, trends.
+        """
+        player_name = trade_packet.get("player_name", "")
+        if not player_name:
+            trade_packet["sentiment_context"] = None
+            return trade_packet
+
+        try:
+            from src.tools.espn_tool import get_nba_news
+            articles = get_nba_news(limit=30) or []
+        except Exception:
+            trade_packet["sentiment_context"] = None
+            return trade_packet
+
+        name_lower = player_name.lower()
+        relevant = [
+            a for a in articles
+            if name_lower in (a.get("headline") or "").lower()
+            or name_lower in (a.get("description") or "").lower()
+        ]
+
+        if not relevant:
+            trade_packet["sentiment_context"] = f"No recent ESPN headlines found for {player_name}."
+            return trade_packet
+
+        headlines_text = "\n".join(
+            f"- {a.get('headline', '')}: {a.get('description', '')}"
+            for a in relevant[:8]
+        )
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        prompt = (
+            f"Player: {player_name}\n"
+            f"Prop: {trade_packet.get('prop_type')} {trade_packet.get('prop_threshold')}+\n\n"
+            f"Recent ESPN headlines mentioning this player:\n{headlines_text}\n\n"
+            "Write a 2–4 sentence summary covering: injury or availability status, "
+            "recent usage or role changes, lineup context, and any narrative that "
+            "could affect this player's stat output tonight. Output only the summary."
+        )
+
+        try:
+            llm_plain = __import__("langchain_anthropic", fromlist=["ChatAnthropic"]).ChatAnthropic(
+                model="claude-haiku-4-5", temperature=0
+            )
+            response = llm_plain.invoke([
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+            summary = (response.content or "").strip()
+            trade_packet["sentiment_context"] = summary if summary else None
+        except Exception:
+            trade_packet["sentiment_context"] = None
+
         return trade_packet

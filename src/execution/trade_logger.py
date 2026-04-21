@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS live_trades (
     logged_at       TEXT    NOT NULL,
     ticker          TEXT    NOT NULL,
     market_title    TEXT,
+    market_type     TEXT    NOT NULL DEFAULT 'GAME_WINNER',  -- GAME_WINNER | PLAYER_PROP
+    player_name     TEXT,              -- populated for PLAYER_PROP trades
+    prop_threshold  REAL,              -- numeric line for PLAYER_PROP trades
     action          TEXT    NOT NULL,   -- BET_YES | BET_NO
     side            TEXT    NOT NULL,   -- yes | no
     yes_price       INTEGER NOT NULL,
@@ -54,6 +57,13 @@ CREATE TABLE IF NOT EXISTS live_trades (
 )
 """
 
+# Migrations applied to existing databases on startup
+_MIGRATIONS = [
+    "ALTER TABLE live_trades ADD COLUMN market_type TEXT DEFAULT 'GAME_WINNER'",
+    "ALTER TABLE live_trades ADD COLUMN player_name TEXT",
+    "ALTER TABLE live_trades ADD COLUMN prop_threshold REAL",
+]
+
 
 class TradeLogger:
     def __init__(self, db_path: str = _DEFAULT_DB):
@@ -61,6 +71,11 @@ class TradeLogger:
         self.db_path = db_path
         with self._conn() as con:
             con.execute(_CREATE_TABLE)
+            for migration in _MIGRATIONS:
+                try:
+                    con.execute(migration)
+                except Exception:
+                    pass  # column already exists in older databases
 
     def _conn(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)
@@ -94,20 +109,28 @@ class TradeLogger:
         critic      = decision.get("critic", {})
         concerns    = json.dumps(critic.get("concerns") or [])
 
+        market_type    = trade_packet.get("contract_type", "GAME_WINNER")
+        player_name    = trade_packet.get("player_name")
+        prop_threshold = trade_packet.get("prop_threshold")
+
         with self._conn() as con:
             cur = con.execute(
                 """
                 INSERT INTO live_trades (
-                    logged_at, ticker, market_title, action, side,
-                    yes_price, entry_cents, contracts, cost_usd,
+                    logged_at, ticker, market_title, market_type,
+                    player_name, prop_threshold,
+                    action, side, yes_price, entry_cents, contracts, cost_usd,
                     kelly, confidence, calibration_gap, sample_size, verdict,
                     risk_score, concerns
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
                     decision.get("ticker") or trade_packet.get("ticker"),
                     trade_packet.get("market_title"),
+                    market_type,
+                    player_name,
+                    prop_threshold,
                     action,
                     side,
                     yes_price,

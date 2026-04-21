@@ -24,7 +24,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Patch targets — always the real LLM agent classes
-QUANT_ANALYZE_PATCH = "src.agents.quant.QuantAgent.analyze"
+QUANT_ANALYZE_PATCH = "src.agents.game_quant_agent.QuantAgent.analyze"
 CRITIC_REVIEW_PATCH = "src.agents.critic.CriticAgent.review"
 
 # ─────────────────────────────────────────────
@@ -448,7 +448,7 @@ def test_paper_trading_e2e():
 
         # ── Log the trade ────────────────────────────────────────────────
         logger   = TradeLogger(db_path=tmp_db)
-        trade_id = logger.log_trade(decision, trade_packet, stake=10.0)
+        trade_id = logger.log_trade(decision, trade_packet)
         assert trade_id >= 1, "log_trade should return a positive row id"
 
         open_trades = logger.open_trades()

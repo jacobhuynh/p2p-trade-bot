@@ -30,9 +30,20 @@ def get_historical_win_rate(price, category_pattern='NBA%'):
     except Exception as e:
         return None
 
+def _extract_yes_price(trade_data) -> int | None:
+    """Normalise yes_price to integer cents from whichever field Kalshi sends."""
+    if (p := trade_data.get('yes_price_dollars')) is not None:
+        return round(float(p) * 100)
+    if (p := trade_data.get('yes_price')) is not None:
+        return int(p)
+    if (p := trade_data.get('price')) is not None:
+        return int(p)
+    return None
+
+
 def process_trade(trade_data):
     ticker    = trade_data.get('market_ticker') or trade_data.get('ticker')
-    yes_price = trade_data.get('yes_price')     or trade_data.get('price')
+    yes_price = _extract_yes_price(trade_data)
 
     if not ticker or yes_price is None:
         return None
@@ -66,11 +77,12 @@ def process_trade(trade_data):
     live_open_interest  = market.get("open_interest", 0)       if market else 0
     live_volume_24h     = market.get("volume_24h", 0)          if market else 0
 
-    # --- FILTER 2: Minimum live liquidity (only enforced when REST creds are present) ---
-    # market is None when creds are absent — skip the check so offline testing still works
-    if market is not None and live_open_interest < 100:
-        print(f"\n[SKIP] | {ticker:<40} | OI={live_open_interest} too low (min 100)")
-        return None
+    # --- FILTER 2: Minimum live liquidity ---
+    # Disabled for testing — Kalshi returns open_interest=0 for active game markets.
+    # Re-enable when the correct field name is confirmed.
+    # if market is not None and live_open_interest < 100:
+    #     print(f"\n[SKIP] | {ticker:<40} | OI={live_open_interest} too low (min 100)")
+    #     return None
 
     return {
         "ticker":               ticker,
