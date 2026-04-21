@@ -626,6 +626,40 @@ pytest tests/test_websocket.py -v
 python tests/test_pipeline.py --live
 ```
 
+### Web UI
+
+A React + FastAPI frontend visualizes the live pipeline, the per-decision
+agent workflow, the logged-trades table, and runs settlement on demand.
+
+```bash
+# 1. Install backend deps (fastapi + uvicorn are in requirements.txt)
+pip install -r requirements.txt
+
+# 2. Start the backend — it also runs the Kalshi WebSocket client in-process
+#    (skipped gracefully if KALSHI creds aren't set; UI still browses
+#     past decisions + trades).
+uvicorn src.web.app:app --reload --port 8000
+
+# 3. In another terminal, start the React dev server
+cd frontend
+npm install      # first time only
+npm run dev      # opens http://localhost:5173
+```
+
+Pages:
+- **/live** — three-column live view (incoming → processing → resolved) plus
+  bouncer rejections; click any resolved decision to open the workflow viz.
+- **/decision/:id** — React Flow graph of Router → Bouncer → Quant ∥ Sentiment
+  → Orchestrator → Critic → Logger; click any node for the full payload.
+- **/trades** — filterable table of `data/live_trades.db` with expandable
+  decision detail.
+- **/settle** — Run-settle button, summary stats, equity curve, and
+  P&L-by-confidence chart.
+
+Decision JSON snapshots are written under `data/decisions/` (one file per
+completed pipeline run) — the workflow viz reads from there, so the UI
+remains useful across restarts.
+
 ---
 
 ## Tests

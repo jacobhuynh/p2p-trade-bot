@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from src.pipeline import router
 from src.agents.orchestrator import LeadAnalyst
 from src.execution.trade_logger import TradeLogger
+from src.web.events import bus
+from src.web import decision_store
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -68,11 +70,36 @@ class KalshiWebsocketClient:
     async def handle_message(self, data):
         if data.get("type") == "trade":
             payload = data.get("msg", {})
+            ticker = payload.get("market_ticker") or payload.get("ticker", "")
+            yes_price = payload.get("yes_price_dollars") or payload.get("yes_price")
+            bus.emit("ticker_received", {"ticker": ticker, "yes_price": yes_price})
+
             market_type, trade_packet = router.route(payload)
+            bus.emit("routed", {
+                "ticker": ticker,
+                "market_type": market_type,
+                "yes_price": yes_price,
+                "accepted": trade_packet is not None,
+            })
+
+            if market_type in ("GAME_WINNER", "PLAYER_PROP") and trade_packet is None:
+                bus.emit("bounced", {
+                    "ticker": ticker,
+                    "market_type": market_type,
+                    "yes_price": yes_price,
+                    "reason": "bouncer/longshot filter or unparseable prop",
+                })
 
             if market_type == "GAME_WINNER" and trade_packet:
                 # ── Full longshot pipeline: Quant → Orchestrator → Critic ────
                 timestamp = datetime.now().strftime("%H:%M:%S")
+                bus.emit("decision_started", {
+                    "ticker": trade_packet["ticker"],
+                    "market_type": "GAME_WINNER",
+                    "yes_price": trade_packet.get("market_price"),
+                    "action": trade_packet.get("action"),
+                    "market_title": trade_packet.get("market_title"),
+                })
                 decision  = await asyncio.to_thread(self.analyst.analyze_signal, trade_packet)
                 quant     = decision.get("quant_summary", {})
                 critic    = decision.get("critic", {})
@@ -154,16 +181,45 @@ class KalshiWebsocketClient:
                     print(f"   Summary:     {critic.get('summary')}")
                     print(f"   Sentiment:   {critic.get('sentiment_note', '')}")
 
+                trade_id = None
                 if status == "APPROVED":
                     trade_id = self.logger.log_trade(decision, trade_packet)
                     print(f"{'─'*60}")
                     print(f"💾 Logged as trade #{trade_id} — run `python -m src.settle` to check P&L")
+
+                record = decision_store.save_decision(
+                    market_type="GAME_WINNER",
+                    status=status or "UNKNOWN",
+                    trade_packet=trade_packet,
+                    decision={**decision, "trade_id": trade_id},
+                )
+                bus.emit("decision_complete", {
+                    "decision_id": record["id"],
+                    "ticker": trade_packet["ticker"],
+                    "market_type": "GAME_WINNER",
+                    "status": status,
+                    "action": decision.get("action"),
+                    "yes_price": decision.get("price"),
+                    "confidence": decision.get("confidence"),
+                    "edge": decision.get("edge"),
+                    "trade_id": trade_id,
+                })
 
                 print(f"{'='*60}")
 
             elif market_type == "PLAYER_PROP" and trade_packet:
                 # ── Full prop pipeline: PropAgent + Sentiment → Orchestrator → Critic ──
                 timestamp = datetime.now().strftime("%H:%M:%S")
+                bus.emit("decision_started", {
+                    "ticker": trade_packet["ticker"],
+                    "market_type": "PLAYER_PROP",
+                    "yes_price": trade_packet.get("market_price"),
+                    "action": trade_packet.get("action"),
+                    "player_name": trade_packet.get("player_name"),
+                    "prop_type": trade_packet.get("prop_type"),
+                    "prop_threshold": trade_packet.get("prop_threshold"),
+                    "market_title": trade_packet.get("market_title"),
+                })
                 decision  = await asyncio.to_thread(self.analyst.analyze_prop_signal, trade_packet)
                 quant     = decision.get("quant_summary", {})
                 critic    = decision.get("critic", {})
@@ -221,10 +277,30 @@ class KalshiWebsocketClient:
                     print(f"   Summary:     {critic.get('summary')}")
                     print(f"   Sentiment:   {critic.get('sentiment_note', '')}")
 
+                trade_id = None
                 if status == "APPROVED":
                     trade_id = self.logger.log_trade(decision, trade_packet)
                     print(f"{'─'*60}")
                     print(f"💾 Logged as trade #{trade_id}")
+
+                record = decision_store.save_decision(
+                    market_type="PLAYER_PROP",
+                    status=status or "UNKNOWN",
+                    trade_packet=trade_packet,
+                    decision={**decision, "trade_id": trade_id},
+                )
+                bus.emit("decision_complete", {
+                    "decision_id": record["id"],
+                    "ticker": trade_packet["ticker"],
+                    "market_type": "PLAYER_PROP",
+                    "status": status,
+                    "action": decision.get("action"),
+                    "yes_price": decision.get("price"),
+                    "confidence": decision.get("confidence"),
+                    "edge": decision.get("edge"),
+                    "trade_id": trade_id,
+                    "player_name": decision.get("player_name") or trade_packet.get("player_name"),
+                })
                 print(f"{'='*60}")
 
             elif market_type == "TOTALS":

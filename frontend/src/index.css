@@ -1,0 +1,18 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+:root { color-scheme: dark; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: #0b0d12;
+  color: #e5e7eb;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
