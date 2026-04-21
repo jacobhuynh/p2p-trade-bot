@@ -96,3 +96,16 @@ def get_decision(decision_id: str) -> dict[str, Any] | None:
             r["_file"] = f.name
             return r
     return None
+
+
+def pick_recent(market_type: str) -> dict[str, Any] | None:
+    """Return the newest decision record matching market_type, or None."""
+    for f in sorted(_BASE.glob("*.json"), reverse=True):
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if r.get("market_type") == market_type:
+            r["_file"] = f.name
+            return r
+    return None

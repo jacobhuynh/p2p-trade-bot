@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 from src.execution.trade_logger import TradeLogger
 from src.web import decision_store
 from src.web.events import bus
+from src.web.mock_fixtures import game_winner_fixture, player_prop_fixture
 
 _PIPELINE_STATE: dict = {"running": False, "error": None}
 
@@ -123,6 +124,83 @@ async def list_trades(status: str = "all") -> list[dict]:
 @app.get("/api/trades/summary")
 async def trades_summary() -> dict:
     return TradeLogger().summary()
+
+
+@app.post("/api/mock")
+async def mock_decision(market_type: str = "GAME_WINNER", processing_ms: int = 1800) -> dict:
+    """Replay an existing decision (newest of `market_type` from data/decisions/)
+    as if it were a fresh live ticker.  Falls back to a hand-crafted fixture
+    only if no real decisions of that type exist yet.  Skips the LLM entirely.
+    """
+    if market_type not in ("GAME_WINNER", "PLAYER_PROP"):
+        market_type = "GAME_WINNER"
+
+    record = decision_store.pick_recent(market_type)
+    if record is not None:
+        trade_packet = dict(record.get("trade_packet") or {})
+        decision = dict(record.get("decision") or {})
+        source = f"replay:{record.get('_file')}"
+    else:
+        if market_type == "PLAYER_PROP":
+            trade_packet, decision = player_prop_fixture()
+        else:
+            trade_packet, decision = game_winner_fixture()
+        source = "fixture"
+
+    asyncio.create_task(_replay_fixture(market_type, trade_packet, decision, processing_ms))
+    return {"started": True, "ticker": trade_packet.get("ticker"), "market_type": market_type, "source": source}
+
+
+async def _replay_fixture(market_type: str, trade_packet: dict, decision: dict, processing_ms: int) -> None:
+    ticker = trade_packet["ticker"]
+    yes_price = trade_packet.get("market_price")
+
+    bus.emit("ticker_received", {"ticker": ticker, "yes_price": yes_price})
+    await asyncio.sleep(0.15)
+
+    bus.emit("routed", {
+        "ticker": ticker,
+        "market_type": market_type,
+        "yes_price": yes_price,
+        "accepted": True,
+    })
+    await asyncio.sleep(0.15)
+
+    started_payload = {
+        "ticker": ticker,
+        "market_type": market_type,
+        "yes_price": yes_price,
+        "action": trade_packet.get("action"),
+        "market_title": trade_packet.get("market_title"),
+    }
+    if market_type == "PLAYER_PROP":
+        started_payload.update({
+            "player_name": trade_packet.get("player_name"),
+            "prop_type": trade_packet.get("prop_type"),
+            "prop_threshold": trade_packet.get("prop_threshold"),
+        })
+    bus.emit("decision_started", started_payload)
+
+    await asyncio.sleep(max(0.1, processing_ms / 1000.0))
+
+    record = decision_store.save_decision(
+        market_type=market_type,
+        status=decision.get("status") or "APPROVED",
+        trade_packet=trade_packet,
+        decision={**decision, "trade_id": None, "_mock": True},
+    )
+    bus.emit("decision_complete", {
+        "decision_id": record["id"],
+        "ticker": ticker,
+        "market_type": market_type,
+        "status": decision.get("status"),
+        "action": decision.get("action"),
+        "yes_price": decision.get("price"),
+        "confidence": decision.get("confidence"),
+        "edge": decision.get("edge"),
+        "trade_id": None,
+        "player_name": decision.get("player_name"),
+    })
 
 
 @app.post("/api/settle")

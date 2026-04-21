@@ -96,4 +96,9 @@ export const api = {
     if (!r.ok) throw new Error(`settle: ${r.status}`)
     return r.text()
   },
+  mock: async (market_type: 'GAME_WINNER' | 'PLAYER_PROP'): Promise<{ started: boolean; ticker: string; market_type: string; source: string }> => {
+    const r = await fetch(`/api/mock?market_type=${market_type}`, { method: 'POST' })
+    if (!r.ok) throw new Error(`mock: ${r.status}`)
+    return r.json()
+  },
 }

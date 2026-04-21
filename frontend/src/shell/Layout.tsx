@@ -31,6 +31,9 @@ export default function Layout() {
             <Tab to="/settle">Settle &amp; Stats</Tab>
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">
+            <MockButton type="GAME_WINNER">Mock Game</MockButton>
+            <MockButton type="PLAYER_PROP">Mock Prop</MockButton>
+            <span className="mx-2 text-zinc-700">|</span>
             <span
               className={`inline-block w-2 h-2 rounded-full ${
                 health?.pipeline_running ? 'bg-emerald-400' : 'bg-zinc-500'
@@ -66,5 +69,36 @@ function Tab({ to, children }: { to: string; children: React.ReactNode }) {
     >
       {children}
     </NavLink>
+  )
+}
+
+function MockButton({ type, children }: { type: 'GAME_WINNER' | 'PLAYER_PROP'; children: React.ReactNode }) {
+  const [busy, setBusy] = useState(false)
+  const [hint, setHint] = useState<string | null>(null)
+  const onClick = async () => {
+    setBusy(true); setHint(null)
+    try {
+      const r = await api.mock(type)
+      setHint(r.source.startsWith('replay') ? 'replayed real' : 'fixture')
+    } catch (e) {
+      setHint('error')
+    } finally {
+      setBusy(false)
+      setTimeout(() => setHint(null), 2500)
+    }
+  }
+  return (
+    <button
+      onClick={onClick}
+      disabled={busy}
+      title="Replay newest decision of this type, or hardcoded fixture"
+      className={`px-2 py-1 rounded text-xs border transition-colors ${
+        busy
+          ? 'bg-zinc-800 text-zinc-500 border-zinc-800 cursor-wait'
+          : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:bg-zinc-800 hover:text-white'
+      }`}
+    >
+      {busy ? '⟳ ' : '▶ '}{children}{hint && <span className="ml-1 text-[10px] text-zinc-500">({hint})</span>}
+    </button>
   )
 }
