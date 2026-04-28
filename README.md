@@ -35,70 +35,46 @@ For player props, the edge is measured differently: comparing the player's recen
 
 ```mermaid
 flowchart TD
-    subgraph INGEST["Ingestion"]
-        WS["Kalshi WebSocket\nRSA-PSS auth · auto-reconnect"]
-        REST["Kalshi REST\nget_market_details()"]
-    end
+    WS["Kalshi WebSocket"]
+    ROUTER["Router"]
+    BOUNCER["Bouncer\nYES ≤20¢ → BET_NO\nYES ≥80¢ → BET_YES"]
+    PROPPARSE["_handle_props()\nparse player · prop · line"]
 
-    subgraph PIPELINE["Pipeline"]
-        ROUTER["Router\nclassify_market(ticker)"]
-        BOUNCER["Bouncer\nYES ≤20¢ → BET_NO\nYES ≥80¢ → BET_YES"]
-        PROPPARSE["_handle_props()\nfetch title · parse player/prop/line\nlongshot filter"]
-        PLACEHOLDER["Placeholder\nprint · drop"]
-    end
+    QUANT["GameQuantAgent\nclaude-haiku-4-5\nDuckDB · ESPN · nba_api"]
+    PROPA["PropAgent\nclaude-haiku-4-5\nhit rate · variance"]
+    SENTIMENT["SentimentAgent\nclaude-haiku-4-5\nESPN news"]
 
-    subgraph ANALYSIS["Analysis Agents  ← run in parallel →"]
-        QUANT["GameQuantAgent  claude-haiku-4-5\nDuckDB calibration gap\nESPN live context\nnba_api team + player stats"]
-        PROPA["PropAgent  claude-haiku-4-5\nhit rate · rolling avg · variance\nmatchup history · usage rate"]
-        SENTIMENT["SentimentAgent  claude-haiku-4-5\nGAME_WINNER: ESPN matchup news\nPLAYER_PROP: player-specific news"]
-    end
+    ORCH["LeadAnalyst\nPython gate · Kelly · Synthesize"]
+    CRITIC["CriticAgent\nclaude-sonnet-4-6\nAdversarial APPROVE / VETO"]
 
-    subgraph DECISION["Decision Layer"]
-        ORCH["LeadAnalyst  orchestrator\nParallel analysis + sentiment\nPython gate · Kelly sizing\n_synthesize() narrative"]
-        CRITIC["CriticAgent  claude-sonnet-4-6\nAdversarial APPROVE / VETO\nPortfolio concentration check\nFLB + prop rules"]
-    end
-
-    subgraph EXECUTION["Execution"]
-        LOGGER["TradeLogger\nlive_trades.db  SQLite\nPENDING_RESOLUTION"]
-        SETTLE["src/settle.py\nKalshi REST poll\nEVALUATED + P&L"]
-        STORE["DecisionStore\ndata/decisions/*.json"]
-    end
-
-    subgraph FRONTEND["Web UI  React + FastAPI"]
-        API["FastAPI  :8000\nREST + WebSocket /ws\nEvent bus"]
-        UI["React  :5173\n/live · /decision/:id\n/trades · /settle"]
-    end
+    LOGGER["TradeLogger\nlive_trades.db"]
+    SETTLE["src/settle.py\nP&L resolution"]
+    API["FastAPI :8000"]
+    UI["React :5173"]
 
     DROPPED(("dropped"))
     VETOD(("VETOED"))
 
     WS --> ROUTER
-    REST -->|enrichment| BOUNCER
-    REST -->|market details| PROPPARSE
-
     ROUTER -->|"KXNBAGAME-*"| BOUNCER
     ROUTER -->|"KXNBAPTS-*"| PROPPARSE
-    ROUTER -->|"KXNBAWINS-*"| PLACEHOLDER
-    ROUTER -->|"non-NBA / unknown"| DROPPED
+    ROUTER -->|other| DROPPED
 
-    BOUNCER -->|longshot signal| QUANT & SENTIMENT
+    BOUNCER -->|longshot| QUANT & SENTIMENT
     BOUNCER -->|mid-price| DROPPED
-    PROPPARSE -->|parsed packet| PROPA & SENTIMENT
-    PROPPARSE -->|parse fail / mid-price| DROPPED
+    PROPPARSE -->|parsed| PROPA & SENTIMENT
+    PROPPARSE -->|fail| DROPPED
 
-    QUANT & SENTIMENT --> ORCH
-    PROPA & SENTIMENT --> ORCH
+    QUANT --> ORCH
+    PROPA --> ORCH
+    SENTIMENT --> ORCH
 
+    ORCH -->|no edge| DROPPED
     ORCH -->|READY| CRITIC
-    ORCH -->|PASS gate| STORE
     CRITIC -->|APPROVE| LOGGER
-    CRITIC -->|APPROVE| STORE
     CRITIC -->|VETO| VETOD
-    CRITIC -->|VETO| STORE
 
-    LOGGER -.->|"python -m src.settle"| SETTLE
-
-    STORE --> API
+    LOGGER -.->|settle| SETTLE
     LOGGER --> API
     WS -->|live events| API
     API <--> UI
