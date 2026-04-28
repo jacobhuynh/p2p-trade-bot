@@ -35,38 +35,73 @@ For player props, the edge is measured differently: comparing the player's recen
 
 ```mermaid
 flowchart TD
-    WS["🌐 Kalshi WebSocket Stream<br/>RSA-PSS authenticated<br/>auto-reconnect + backoff"]
-    ROUTER["Router<br/>classify_market(ticker)"]
-    BOUNCER["Bouncer — Longshot Filter<br/>YES ≤20¢ → BET_NO<br/>YES ≥80¢ → BET_YES<br/>+ Kalshi REST enrichment"]
-    PROPPARSE["Router _handle_props()<br/>market_details fetch<br/>player + prop parsing<br/>longshot filter"]
-    QUANT["GameQuantAgent<br/>Calibration gap analysis<br/>+ ESPN live context<br/>+ nba_api team records<br/>+ key player stats"]
-    PROPA["PropAgent<br/>Player stats edge<br/>hit rate · variance<br/>matchup history"]
-    SENTIMENT["SentimentAgent<br/>GAME_WINNER: ESPN matchup<br/>PLAYER_PROP: player news"]
-    ORCH["LeadAnalyst<br/>analyze_signal / analyze_prop_signal<br/>Parallel Quant/Prop + Sentiment<br/>Gate · Synthesize · Kelly"]
-    CRITIC["CriticAgent<br/>Adversarial review<br/>GAME_WINNER + PLAYER_PROP aware<br/>APPROVE / VETO"]
-    LOGGER["TradeLogger<br/>SQLite · live_trades.db<br/>market_type column<br/>PENDING_RESOLUTION"]
-    SETTLE["src/settle.py<br/>Kalshi REST poll<br/>EVALUATED + P&L"]
-    PLACEHOLDER["◻ Placeholder<br/>print one-liner · drop"]
-    DROPPED(("· dropped"))
-    VETOD(("· VETOED"))
+    subgraph INGEST["Ingestion"]
+        WS["Kalshi WebSocket\nRSA-PSS auth · auto-reconnect"]
+        REST["Kalshi REST\nget_market_details()"]
+    end
+
+    subgraph PIPELINE["Pipeline"]
+        ROUTER["Router\nclassify_market(ticker)"]
+        BOUNCER["Bouncer\nYES ≤20¢ → BET_NO\nYES ≥80¢ → BET_YES"]
+        PROPPARSE["_handle_props()\nfetch title · parse player/prop/line\nlongshot filter"]
+        PLACEHOLDER["Placeholder\nprint · drop"]
+    end
+
+    subgraph ANALYSIS["Analysis Agents  ← run in parallel →"]
+        QUANT["GameQuantAgent  claude-haiku-4-5\nDuckDB calibration gap\nESPN live context\nnba_api team + player stats"]
+        PROPA["PropAgent  claude-haiku-4-5\nhit rate · rolling avg · variance\nmatchup history · usage rate"]
+        SENTIMENT["SentimentAgent  claude-haiku-4-5\nGAME_WINNER: ESPN matchup news\nPLAYER_PROP: player-specific news"]
+    end
+
+    subgraph DECISION["Decision Layer"]
+        ORCH["LeadAnalyst  orchestrator\nParallel analysis + sentiment\nPython gate · Kelly sizing\n_synthesize() narrative"]
+        CRITIC["CriticAgent  claude-sonnet-4-6\nAdversarial APPROVE / VETO\nPortfolio concentration check\nFLB + prop rules"]
+    end
+
+    subgraph EXECUTION["Execution"]
+        LOGGER["TradeLogger\nlive_trades.db  SQLite\nPENDING_RESOLUTION"]
+        SETTLE["src/settle.py\nKalshi REST poll\nEVALUATED + P&L"]
+        STORE["DecisionStore\ndata/decisions/*.json"]
+    end
+
+    subgraph FRONTEND["Web UI  React + FastAPI"]
+        API["FastAPI  :8000\nREST + WebSocket /ws\nEvent bus"]
+        UI["React  :5173\n/live · /decision/:id\n/trades · /settle"]
+    end
+
+    DROPPED(("dropped"))
+    VETOD(("VETOED"))
 
     WS --> ROUTER
+    REST -->|enrichment| BOUNCER
+    REST -->|market details| PROPPARSE
+
     ROUTER -->|"KXNBAGAME-*"| BOUNCER
     ROUTER -->|"KXNBAPTS-*"| PROPPARSE
     ROUTER -->|"KXNBAWINS-*"| PLACEHOLDER
-    BOUNCER -->|longshot detected| QUANT
-    BOUNCER -->|longshot detected| SENTIMENT
-    BOUNCER -->|mid-price or non-NBA| DROPPED
-    PROPPARSE -->|parsed + longshot detected| PROPA
-    PROPPARSE -->|parse fail or mid-price| DROPPED
-    PROPA --> SENTIMENT
-    QUANT --> ORCH
-    SENTIMENT --> ORCH
-    PROPA --> ORCH
-    ORCH --> CRITIC
+    ROUTER -->|"non-NBA / unknown"| DROPPED
+
+    BOUNCER -->|longshot signal| QUANT & SENTIMENT
+    BOUNCER -->|mid-price| DROPPED
+    PROPPARSE -->|parsed packet| PROPA & SENTIMENT
+    PROPPARSE -->|parse fail / mid-price| DROPPED
+
+    QUANT & SENTIMENT --> ORCH
+    PROPA & SENTIMENT --> ORCH
+
+    ORCH -->|READY| CRITIC
+    ORCH -->|PASS gate| STORE
     CRITIC -->|APPROVE| LOGGER
+    CRITIC -->|APPROVE| STORE
     CRITIC -->|VETO| VETOD
-    LOGGER -. "python -m src.settle" .-> SETTLE
+    CRITIC -->|VETO| STORE
+
+    LOGGER -.->|"python -m src.settle"| SETTLE
+
+    STORE --> API
+    LOGGER --> API
+    WS -->|live events| API
+    API <--> UI
 ```
 
 ---
