@@ -154,7 +154,9 @@ function StreamRow({ ev }: { ev: PipelineEvent }) {
 }
 
 function ProcessingCard({ ev }: { ev: PipelineEvent }) {
-  const stages = ['Quant', 'Sentiment', 'Orchestrator', 'Critic']
+  const stages = ev.data.market_type === 'PLAYER_PROP'
+    ? ['PropAgent', 'Sentiment', 'Orchestrator', 'Critic']
+    : ['Quant', 'Sentiment', 'Orchestrator', 'Critic']
   return (
     <div className="rounded-md border border-amber-900/50 bg-amber-950/20 p-2 animate-pulse-slow">
       <div className="flex items-center gap-2 text-[12px]">

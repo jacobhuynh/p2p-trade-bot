@@ -108,14 +108,20 @@ class PlayerPropAgent:
 
         n_games = len(raw_values)
 
+        # Effective win rate from our bet's perspective:
+        # BET_NO wins when the player misses the line, so invert hit_rate.
+        effective_win_rate: Optional[float] = None
+        if hit_rate is not None:
+            effective_win_rate = round(1.0 - hit_rate, 4) if action == "BET_NO" else hit_rate
+
         # ── Verdict ────────────────────────────────────────────────────────────
-        if n_games < 5 or hit_rate is None:
+        if n_games < 5 or effective_win_rate is None:
             verdict      = "INSUFFICIENT_DATA"
             data_quality = "INSUFFICIENT"
-        elif hit_rate > 0.65:
+        elif effective_win_rate > 0.65:
             verdict      = "EDGE_CONFIRMED"
             data_quality = "SUFFICIENT"
-        elif hit_rate > 0.55:
+        elif effective_win_rate > 0.55:
             verdict      = "EDGE_WEAK"
             data_quality = "SUFFICIENT"
         else:
@@ -123,10 +129,8 @@ class PlayerPropAgent:
             data_quality = "SUFFICIENT"
 
         # ── Kelly sizing (conservative for props) ──────────────────────────────
-        # Scale kelly by how far hit_rate exceeds 0.5 (breakeven).
-        # Cap tightly at _KELLY_CAP to reflect higher per-game variance.
-        if hit_rate is not None and hit_rate > 0.5:
-            raw_kelly = (hit_rate - 0.5) / (1 - hit_rate + 1e-9)
+        if effective_win_rate is not None and effective_win_rate > 0.5:
+            raw_kelly = (effective_win_rate - 0.5) / (1 - effective_win_rate + 1e-9)
             kelly_fraction = round(min(raw_kelly, _KELLY_CAP), 4)
         else:
             kelly_fraction = 0.01

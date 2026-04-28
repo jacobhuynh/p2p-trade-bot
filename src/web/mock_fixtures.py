@@ -118,9 +118,9 @@ def player_prop_fixture() -> tuple[dict, dict]:
         "price": 17,
         "side": "no",
         "status": "APPROVED",
-        "confidence": "MEDIUM",
-        "edge": 0.0185,
-        "kelly_fraction": 0.09,
+        "confidence": "HIGH",
+        "edge": 0.68,
+        "kelly_fraction": 0.05,
         "reason": (
             "Recent AST trend below line; matchup history favors UNDER; Murray return "
             "reduces Jokic's projected assist share."
@@ -131,14 +131,15 @@ def player_prop_fixture() -> tuple[dict, dict]:
         "quant_summary": {
             "prop_type": "AST",
             "prop_threshold": 12.0,
-            "actual_win_rate": 0.32,
+            "actual_win_rate": 0.68,
             "hit_rate": 0.32,
+            "effective_win_rate": 0.68,
             "recent_avg": 9.4,
-            "calibration_gap": 0.0185,
+            "calibration_gap": -2.6,
             "variance": 8.9,
             "sample_size": 28,
             "n_games_sampled": 28,
-            "data_quality": "MEDIUM",
+            "data_quality": "SUFFICIENT",
             "verdict": "EDGE_CONFIRMED",
             "matchup_context": {
                 "avg_pts_vs_opp": 27.5, "avg_reb_vs_opp": 12.1,

@@ -292,8 +292,8 @@ Write one short paragraph (2-4 sentences) that combines the stat-based edge with
         if verdict == "INSUFFICIENT_DATA":
             reason = f"Insufficient data — only {n_games} games sampled (need ≥ 5)"
             gate_pass = True
-        elif hit_rate is None or hit_rate <= 0.50:
-            reason = f"No prop edge — hit_rate={hit_rate} ≤ 0.50"
+        elif verdict == "NO_EDGE":
+            reason = f"No prop edge — verdict=NO_EDGE, hit_rate={hit_rate}"
             gate_pass = True
         else:
             gate_pass = False

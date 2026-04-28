@@ -210,7 +210,7 @@ function buildPropStages(d: FullDecision): StageView[] {
     routerStage(d, tp),
     {
       key: 'propparse',
-      label: 'Router._handle_props',
+      label: 'Bouncer',
       status: 'ok',
       oneLiner: propParseLabel,
       payload: {
@@ -262,11 +262,11 @@ const GAME_POSITIONS: Record<string, { x: number; y: number }> = {
 const PROP_POSITIONS: Record<string, { x: number; y: number }> = {
   router:       { x:    0, y: 200 },
   propparse:    { x:  220, y: 200 },
-  propa:        { x:  460, y: 200 },
-  sentiment:    { x:  680, y: 330 },
-  orchestrator: { x:  900, y: 200 },
-  critic:       { x: 1140, y: 200 },
-  logger:       { x: 1380, y: 200 },
+  propa:        { x:  470, y:  90 },
+  sentiment:    { x:  470, y: 310 },
+  orchestrator: { x:  730, y: 200 },
+  critic:       { x:  980, y: 200 },
+  logger:       { x: 1230, y: 200 },
 }
 
 function buildGraph(
@@ -302,7 +302,7 @@ function buildGraph(
   if (isProp) {
     e('router', 'propparse', true)
     e('propparse', 'propa', true)
-    e('propa', 'sentiment', true)
+    e('propparse', 'sentiment', true)
     e('propa', 'orchestrator', true)
     e('sentiment', 'orchestrator', true)
     e('orchestrator', 'critic', true)
