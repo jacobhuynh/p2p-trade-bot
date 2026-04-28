@@ -34,49 +34,54 @@ For player props, the edge is measured differently: comparing the player's recen
 ## Agent Architecture
 
 ```mermaid
-flowchart TD
-    WS["Kalshi WebSocket"]
+flowchart LR
+    WS["Kalshi\nWebSocket"]
     ROUTER["Router"]
+
     BOUNCER["Bouncer\nYES ≤20¢ → BET_NO\nYES ≥80¢ → BET_YES"]
-    PROPPARSE["_handle_props()\nparse player · prop · line"]
+    PROPPARSE["_handle_props\nparse player · prop · line"]
 
-    QUANT["GameQuantAgent\nclaude-haiku-4-5\nDuckDB · ESPN · nba_api"]
-    PROPA["PropAgent\nclaude-haiku-4-5\nhit rate · variance"]
-    SENTIMENT["SentimentAgent\nclaude-haiku-4-5\nESPN news"]
+    QUANT["GameQuantAgent\nhaiku-4-5\nDuckDB · ESPN · nba_api"]
+    SENTIMENT["SentimentAgent\nhaiku-4-5\nESPN news"]
+    PROPA["PropAgent\nhaiku-4-5\nhit rate · variance"]
 
-    ORCH["LeadAnalyst\nPython gate · Kelly · Synthesize"]
-    CRITIC["CriticAgent\nclaude-sonnet-4-6\nAdversarial APPROVE / VETO"]
+    ORCH["LeadAnalyst\ngate · Kelly · Synthesize"]
+    CRITIC["CriticAgent\nsonnet-4-6\nAPPROVE / VETO"]
 
     LOGGER["TradeLogger\nlive_trades.db"]
-    SETTLE["src/settle.py\nP&L resolution"]
-    API["FastAPI :8000"]
-    UI["React :5173"]
+    SETTLE["settle.py\nP&L"]
+    API["FastAPI\n:8000"]
+    UI["React\n:5173"]
 
     DROPPED(("dropped"))
     VETOD(("VETOED"))
 
     WS --> ROUTER
-    ROUTER -->|"KXNBAGAME-*"| BOUNCER
-    ROUTER -->|"KXNBAPTS-*"| PROPPARSE
-    ROUTER -->|other| DROPPED
+    ROUTER -- KXNBAGAME --> BOUNCER
+    ROUTER -- KXNBAPTS --> PROPPARSE
+    ROUTER -- other --> DROPPED
 
-    BOUNCER -->|longshot| QUANT & SENTIMENT
-    BOUNCER -->|mid-price| DROPPED
-    PROPPARSE -->|parsed| PROPA & SENTIMENT
-    PROPPARSE -->|fail| DROPPED
+    BOUNCER -- longshot --> QUANT
+    BOUNCER -- longshot --> SENTIMENT
+    BOUNCER -- mid-price --> DROPPED
+
+    PROPPARSE -- parsed --> PROPA
+    PROPPARSE -- parsed --> SENTIMENT
+    PROPPARSE -- fail --> DROPPED
 
     QUANT --> ORCH
-    PROPA --> ORCH
     SENTIMENT --> ORCH
+    PROPA --> ORCH
 
-    ORCH -->|no edge| DROPPED
-    ORCH -->|READY| CRITIC
-    CRITIC -->|APPROVE| LOGGER
-    CRITIC -->|VETO| VETOD
+    ORCH -- no edge --> DROPPED
+    ORCH -- READY --> CRITIC
 
-    LOGGER -.->|settle| SETTLE
+    CRITIC -- APPROVE --> LOGGER
+    CRITIC -- VETO --> VETOD
+
+    LOGGER -. settle .-> SETTLE
     LOGGER --> API
-    WS -->|live events| API
+    WS --> API
     API <--> UI
 ```
 
